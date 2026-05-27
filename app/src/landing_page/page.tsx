@@ -1,8 +1,9 @@
-'use client';
+"use client";
 
-import { useEffect, useRef, useState } from 'react';
-import Link from 'next/link';
-import './index.css';
+import { useEffect, useRef, useState } from "react";
+import Link from "next/link";
+import "./index.css";
+import AwsConnectForm from "@/app/components/AwsConnectForm";
 
 export default function LandingPage() {
   const grainCanvasRef = useRef<HTMLCanvasElement>(null);
@@ -14,10 +15,14 @@ export default function LandingPage() {
   const [dismissed, setDismissed] = useState(new Set<string>());
   const [isScrolled, setIsScrolled] = useState(false);
 
+  const handleScanSuccess = (liveData: any[]) => {
+    setFindings(liveData);
+  };
+
   useEffect(() => {
     const canvas = grainCanvasRef.current;
     if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+    const ctx = canvas.getContext("2d");
     if (!ctx) return;
 
     let w = (canvas.width = window.innerWidth);
@@ -28,7 +33,7 @@ export default function LandingPage() {
       w = canvas.width = window.innerWidth;
       h = canvas.height = window.innerHeight;
     };
-    window.addEventListener('resize', resize);
+    window.addEventListener("resize", resize);
 
     const drawGrain = () => {
       const imageData = ctx.createImageData(w, h);
@@ -36,7 +41,7 @@ export default function LandingPage() {
       for (let i = 0; i < data.length; i += 4) {
         const v = (Math.random() * 255) | 0;
         data[i] = data[i + 1] = data[i + 2] = v;
-        data[i + 3] = 18 + (Math.random() * 18);
+        data[i + 3] = 18 + Math.random() * 18;
       }
       ctx.putImageData(imageData, 0, 0);
       frame++;
@@ -44,7 +49,7 @@ export default function LandingPage() {
       else setTimeout(() => requestAnimationFrame(drawGrain), 50);
     };
     drawGrain();
-    return () => window.removeEventListener('resize', resize);
+    return () => window.removeEventListener("resize", resize);
   }, []);
 
   useEffect(() => {
@@ -59,12 +64,12 @@ export default function LandingPage() {
         const tick = (now: number) => {
           const p = Math.min((now - start) / 2200, 1);
           const ease = 1 - Math.pow(1 - p, 4);
-          el.textContent = '$' + Math.floor(ease * target).toLocaleString();
+          el.textContent = "$" + Math.floor(ease * target).toLocaleString();
           if (p < 1) requestAnimationFrame(tick);
         };
         tick(start);
       },
-      { threshold: 0.4 }
+      { threshold: 0.4 },
     );
     obs.observe(el);
     return () => obs.disconnect();
@@ -73,38 +78,38 @@ export default function LandingPage() {
   useEffect(() => {
     if (!terminalRef.current) return;
     const lines = [
-      { t: 'dim', s: '# Tuff · Cognitive Engine' },
-      { t: '', s: '' },
-      { t: 'dim', s: '> Analyzing 247 EC2 instances across 4 regions...' },
-      { t: '', s: '' },
-      { t: 'green', s: '[AGENT] Querying CloudWatch — 14d CPU window' },
-      { t: 'green', s: '[RAG]   c5.2xlarge pricing  →  $0.340 / hr' },
-      { t: 'green', s: '[RAG]   t3.large pricing    →  $0.083 / hr' },
-      { t: '', s: '' },
-      { t: 'sand', s: '[FINDING] i-0a1b2c3d4e' },
-      { t: 'muted', s: '  Instance : c5.2xlarge  ·  us-east-1' },
-      { t: 'muted', s: '  Avg CPU  : 3.2%  over 14 days' },
-      { t: 'sand', s: '  Status   : OVER-PROVISIONED  ⚠' },
-      { t: '', s: '' },
-      { t: 'green', s: '[RECOMMENDATION]' },
-      { t: 'muted', s: '  Downsize    →  t3.large' },
-      { t: 'green', s: '  Savings     →  $174.24 / mo' },
-      { t: 'muted', s: '  Confidence  →  97.3%' },
-      { t: '', s: '' },
-      { t: 'green', s: '[ACTION GENERATED]' },
-      { t: 'muted', s: '  aws ec2 modify-instance-attribute \\' },
-      { t: 'muted', s: '    --instance-id i-0a1b2c3d4e \\' },
-      { t: 'muted', s: '    --instance-type {"Value":"t3.large"}' },
-      { t: '', s: '' },
-      { t: 'sand', s: '[STATUS] Awaiting your approval →' },
+      { t: "dim", s: "# Tuff · Cognitive Engine" },
+      { t: "", s: "" },
+      { t: "dim", s: "> Analyzing 247 EC2 instances across 4 regions..." },
+      { t: "", s: "" },
+      { t: "green", s: "[AGENT] Querying CloudWatch — 14d CPU window" },
+      { t: "green", s: "[RAG]   c5.2xlarge pricing  →  $0.340 / hr" },
+      { t: "green", s: "[RAG]   t3.large pricing    →  $0.083 / hr" },
+      { t: "", s: "" },
+      { t: "sand", s: "[FINDING] i-0a1b2c3d4e" },
+      { t: "muted", s: "  Instance : c5.2xlarge  ·  us-east-1" },
+      { t: "muted", s: "  Avg CPU  : 3.2%  over 14 days" },
+      { t: "sand", s: "  Status   : OVER-PROVISIONED  ⚠" },
+      { t: "", s: "" },
+      { t: "green", s: "[RECOMMENDATION]" },
+      { t: "muted", s: "  Downsize    →  t3.large" },
+      { t: "green", s: "  Savings     →  $174.24 / mo" },
+      { t: "muted", s: "  Confidence  →  97.3%" },
+      { t: "", s: "" },
+      { t: "green", s: "[ACTION GENERATED]" },
+      { t: "muted", s: "  aws ec2 modify-instance-attribute \\" },
+      { t: "muted", s: "    --instance-id i-0a1b2c3d4e \\" },
+      { t: "muted", s: '    --instance-type {"Value":"t3.large"}' },
+      { t: "", s: "" },
+      { t: "sand", s: "[STATUS] Awaiting your approval →" },
     ];
 
     const colorMap: { [key: string]: string } = {
-      dim: 't-dim',
-      sand: 't-sand',
-      green: 't-green',
-      muted: 't-muted',
-      '': '',
+      dim: "t-dim",
+      sand: "t-sand",
+      green: "t-green",
+      muted: "t-muted",
+      "": "",
     };
     const term = terminalRef.current;
     let li = 0,
@@ -114,18 +119,21 @@ export default function LandingPage() {
     const type = () => {
       if (li >= lines.length) return;
       const { t, s } = lines[li];
-      const cls = colorMap[t] || '';
+      const cls = colorMap[t] || "";
       if (ci <= s.length) {
         const partial = s.slice(0, ci);
         const rows = done
           .map(({ t, s }: any) => {
-            const c = colorMap[t] || '';
+            const c = colorMap[t] || "";
             return c ? `<span class="${c}">${s}</span>` : s;
           })
-          .join('\n');
+          .join("\n");
         const cur = cls ? `<span class="${cls}">${partial}</span>` : partial;
         term.innerHTML =
-          rows + (rows && '\n') + cur + (ci === s.length ? '' : '<span class="t-cursor"></span>');
+          rows +
+          (rows && "\n") +
+          cur +
+          (ci === s.length ? "" : '<span class="t-cursor"></span>');
         ci++;
         term.scrollTop = term.scrollHeight;
         setTimeout(type, ci === 1 ? 55 : 13);
@@ -140,61 +148,69 @@ export default function LandingPage() {
   }, []);
 
   useEffect(() => {
-    const data = [
-      {
-        id: 'i-0a1b2c3d4e',
-        type: 'Over-provisioned EC2',
-        inst: 'c5.2xlarge',
-        cpu: '3.2%',
-        cur: '$248/mo',
-        save: '$174/mo',
-        region: 'us-east-1',
-        cpuWarn: false,
-      },
-      {
-        id: 'i-5f6a7b8c9d',
-        type: 'Zombie EBS Volume',
-        inst: 'gp3 500GB',
-        cpu: '0%',
-        cur: '$40/mo',
-        save: '$40/mo',
-        region: 'eu-west-1',
-        cpuWarn: true,
-      },
-      {
-        id: 'i-eab12cd34e',
-        type: 'Idle RDS Instance',
-        inst: 'db.r5.xlarge',
-        cpu: '1.1%',
-        cur: '$380/mo',
-        save: '$285/mo',
-        region: 'us-west-2',
-        cpuWarn: false,
-      },
-      {
-        id: 'i-f0g1h2i3j4',
-        type: 'Over-provisioned EC2',
-        inst: 'm5.4xlarge',
-        cpu: '6.8%',
-        cur: '$560/mo',
-        save: '$420/mo',
-        region: 'ap-se-1',
-        cpuWarn: false,
-      },
-    ];
-    setFindings(data);
+    setFindings([]);
   }, []);
 
   useEffect(() => {
     const handleScroll = () => {
       setIsScrolled(window.scrollY > 10);
     };
-    window.addEventListener('scroll', handleScroll);
-    return () => window.removeEventListener('scroll', handleScroll);
+    window.addEventListener("scroll", handleScroll);
+    return () => window.removeEventListener("scroll", handleScroll);
   }, []);
 
-  const handleApprove = (id: string) => {
-    setApproved((prev) => new Set(prev).add(id));
+  const handleApprove = async (id: string) => {
+    // Find the exact finding item inside our current array state to read its context
+    const targetFinding = findings.find((f) => f.id === id);
+    if (!targetFinding) return;
+
+    // Derive the action mapping type from the row data
+    let actionType = "stop_instance";
+    if (targetFinding.type.includes("Volume")) actionType = "delete_volume";
+    if (targetFinding.type.includes("S3")) actionType = "secure_s3";
+
+    try {
+      // Optimistically mark as processing or complete in the UI state
+      setApproved((prev) => new Set(prev).add(id));
+
+      const response = await fetch("http://localhost:8000/api/execute", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          // Using "demo" markers to trip the simulation gate safely on our backend
+          aws_access_key: "demo",
+          aws_secret_key: "12345",
+          region:
+            targetFinding.region === "global"
+              ? "us-east-1"
+              : targetFinding.region,
+          resource_id: id,
+          action_type: actionType,
+        }),
+      });
+
+      const result = await response.json();
+
+      if (response.ok && result.status === "success") {
+        alert(`Agent Response: ${result.message}`);
+        // Smoothly hide the row from the viewport queue once it's fixed
+        setTimeout(() => {
+          setDismissed((prev) => new Set(prev).add(id));
+        }, 800);
+      } else {
+        alert("Remediation execution returned an error profile.");
+        // Roll back the state if it failed
+        setApproved((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
+      }
+    } catch (err) {
+      alert("Could not reach backend remediation gate.");
+    }
   };
 
   const handleDismiss = (id: string) => {
@@ -210,8 +226,13 @@ export default function LandingPage() {
       <div className="outer-bg"></div>
 
       <div className="frame">
-        <nav ref={navRef} className={`nav-bar ${isScrolled ? 'nav-scrolled' : ''}`}>
-          <Link href="/src/landing_page" className="logo fade-up d1">Tuff</Link>
+        <nav
+          ref={navRef}
+          className={`nav-bar ${isScrolled ? "nav-scrolled" : ""}`}
+        >
+          <Link href="/src/landing_page" className="logo fade-up d1">
+            Tuff
+          </Link>
           <div className="nav-center fade-up d2">
             <a href="#architecture">Architecture</a>
             <a href="#demo">Demo</a>
@@ -219,7 +240,9 @@ export default function LandingPage() {
             <a href="#cta">Access</a>
           </div>
           <div className="nav-right fade-up d2">
-            <Link href="/src/login_page" className="pill">Request Access</Link>
+            <Link href="/src/login_page" className="pill">
+              Request Access
+            </Link>
             <div className="hamburger">
               <span></span>
               <span></span>
@@ -227,34 +250,41 @@ export default function LandingPage() {
           </div>
         </nav>
 
-        <section className="hero" style={{
-          backgroundImage: 'url(/main_background.jpg)',
-          backgroundSize: 'cover',
-          backgroundPosition: 'center',
-          backgroundAttachment: 'fixed'
-        }}>
+        <section
+          className="hero"
+          style={{
+            backgroundImage: "url(/main_background.jpg)",
+            backgroundSize: "cover",
+            backgroundPosition: "center",
+            backgroundAttachment: "fixed",
+          }}
+        >
           <div className="hero-headline">
             <div className="eyebrow fade-up d2">
               FinOps Intelligence &nbsp;·&nbsp; AWS Cost Optimization
             </div>
             <h1 className="fade-up d3">
-              Stop<br />
-              paying for<br />
+              Stop
+              <br />
+              paying for
+              <br />
               <em>idle</em> cloud.
             </h1>
             <p className="subtitle fade-up d4">
-              An agentic system that surfaces waste, reasons over real pricing, and hands you the
-              exact fix.
+              An agentic system that surfaces waste, reasons over real pricing,
+              and hands you the exact fix.
             </p>
           </div>
 
           <div className="hero-bottom fade-up d5">
             <div className="hero-footnote">
-              Ingestion · Analysis<br />
+              Ingestion · Analysis
+              <br />
               Action · Interface
             </div>
             <div className="hero-corner">
-              Human approval<br />
+              Human approval
+              <br />
               required on every action
             </div>
           </div>
@@ -290,8 +320,8 @@ export default function LandingPage() {
               <div className="phase-n">01</div>
               <div className="phase-title">Ingestion</div>
               <div className="phase-desc">
-                Read-only boto3 pulls CloudWatch CPU telemetry and Cost Explorer spend across all
-                regions over a 14-day window.
+                Read-only boto3 pulls CloudWatch CPU telemetry and Cost Explorer
+                spend across all regions over a 14-day window.
               </div>
             </div>
             <div className="phase">
@@ -299,8 +329,8 @@ export default function LandingPage() {
               <div className="phase-n">02</div>
               <div className="phase-title">Analysis</div>
               <div className="phase-desc">
-                LangChain agent + ChromaDB RAG grounds every recommendation in real AWS Pricing
-                API data. No hallucinated numbers.
+                LangChain agent + ChromaDB RAG grounds every recommendation in
+                real AWS Pricing API data. No hallucinated numbers.
               </div>
             </div>
             <div className="phase">
@@ -308,8 +338,8 @@ export default function LandingPage() {
               <div className="phase-n">03</div>
               <div className="phase-title">Action</div>
               <div className="phase-desc">
-                Structured JSON with exact AWS CLI commands. All scripts queued — never
-                auto-executed. Every action waits for you.
+                Structured JSON with exact AWS CLI commands. All scripts queued
+                — never auto-executed. Every action waits for you.
               </div>
             </div>
             <div className="phase">
@@ -317,27 +347,32 @@ export default function LandingPage() {
               <div className="phase-n">04</div>
               <div className="phase-title">Interface</div>
               <div className="phase-desc">
-                Next.js dashboard surfaces findings with wasted spend and reasoning. FastAPI
-                executes only on your approval.
+                Next.js dashboard surfaces findings with wasted spend and
+                reasoning. FastAPI executes only on your approval.
               </div>
             </div>
           </div>
         </section>
 
         <section className="terminal-section" id="demo">
-          <div className="section-header" style={{ padding: '0', marginBottom: '52px' }}>
+          <div
+            className="section-header"
+            style={{ padding: "0", marginBottom: "52px" }}
+          >
             <span className="section-label">Live Agent Output</span>
             <div className="section-rule"></div>
           </div>
           <div className="terminal-layout">
             <div className="terminal-copy">
               <h2>
-                Watch Tuff<br />
+                Watch Tuff
+                <br />
                 <em>reason</em> in real-time.
               </h2>
               <p>
-                The cognitive engine queries CloudWatch, grounds every number in real AWS pricing
-                via RAG, and generates the exact CLI command to fix it — held for your approval.
+                The cognitive engine queries CloudWatch, grounds every number in
+                real AWS pricing via RAG, and generates the exact CLI command to
+                fix it — held for your approval.
               </p>
             </div>
             <div className="terminal-wrap">
@@ -351,11 +386,13 @@ export default function LandingPage() {
             </div>
           </div>
         </section>
+        <AwsConnectForm onScanComplete={handleScanSuccess} />
 
         <section className="queue-section" id="queue">
           <div className="queue-header">
             <h2>
-              Agent findings awaiting<br />
+              Agent findings awaiting
+              <br />
               your <em>approval.</em>
             </h2>
             <span className="queue-count">
@@ -377,12 +414,12 @@ export default function LandingPage() {
             {visibleFindings.length === 0 ? (
               <div
                 style={{
-                  textAlign: 'center',
-                  padding: '48px',
-                  fontSize: '12px',
-                  color: 'rgba(237,224,206,0.18)',
-                  letterSpacing: '.14em',
-                  textTransform: 'uppercase',
+                  textAlign: "center",
+                  padding: "48px",
+                  fontSize: "12px",
+                  color: "rgba(237,224,206,0.18)",
+                  letterSpacing: ".14em",
+                  textTransform: "uppercase",
                 }}
               >
                 All findings processed
@@ -403,28 +440,36 @@ export default function LandingPage() {
                   <div
                     className="finding-cpu"
                     style={{
-                      color: f.cpuWarn ? 'rgba(220,90,70,.8)' : 'rgba(237,224,206,.5)',
+                      color: f.cpuWarn
+                        ? "rgba(220,90,70,.8)"
+                        : "rgba(237,224,206,.5)",
                     }}
                   >
                     {f.cpu}
                   </div>
-                  <div style={{ display: 'flex', gap: '6px' }}>
+                  <div style={{ display: "flex", gap: "6px" }}>
                     {approved.has(f.id) ? (
                       <span
                         style={{
-                          fontSize: '10px',
-                          color: 'rgba(140,185,130,.75)',
-                          letterSpacing: '.1em',
+                          fontSize: "10px",
+                          color: "rgba(140,185,130,.75)",
+                          letterSpacing: ".1em",
                         }}
                       >
                         ✓ Queued
                       </span>
                     ) : (
                       <>
-                        <button className="approve-btn" onClick={() => handleApprove(f.id)}>
+                        <button
+                          className="approve-btn"
+                          onClick={() => handleApprove(f.id)}
+                        >
                           Approve
                         </button>
-                        <button className="dismiss-btn" onClick={() => handleDismiss(f.id)}>
+                        <button
+                          className="dismiss-btn"
+                          onClick={() => handleDismiss(f.id)}
+                        >
                           ✕
                         </button>
                       </>
@@ -438,22 +483,34 @@ export default function LandingPage() {
 
         <section className="cta" id="cta">
           <h2>
-            Your Cloud bill is<br />
+            Your Cloud bill is
+            <br />
             <em>bleeding money.</em>
           </h2>
           <p>
-            Connect your account in minutes. Tuff audits everything, surfaces the waste, hands you
-            the commands. You click approve.
+            Connect your account in minutes. Tuff audits everything, surfaces
+            the waste, hands you the commands. You click approve.
           </p>
           <div className="cta-btns">
-            <Link href="/src/signup_page" className="btn-filled">Deploy Tuff →</Link>
-            <a href="https://docs.example.com" target="_blank" rel="noopener noreferrer" className="btn-outline">Read the Docs</a>
+            <Link href="/src/signup_page" className="btn-filled">
+              Deploy Tuff →
+            </Link>
+            <a
+              href="https://docs.example.com"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="btn-outline"
+            >
+              Read the Docs
+            </a>
           </div>
         </section>
 
         <footer>
           <span className="f-logo">tuff</span>
-          <span className="f-stack">Python · FastAPI · Next.js · ChromaDB · Boto3</span>
+          <span className="f-stack">
+            Python · FastAPI · Next.js · ChromaDB · Boto3
+          </span>
           <span className="f-copy">© 2025 Tuff FinOps</span>
         </footer>
       </div>
