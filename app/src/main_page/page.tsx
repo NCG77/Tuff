@@ -6,8 +6,18 @@ import { useAuth } from "../../context/AuthContext";
 import AwsConnectForm from "@/app/components/AwsConnectForm";
 import MetricsPanel from "@/app/components/MetricPanel";
 import TabFilters from "@/app/components/TabFilters";
-import CodeDrawer from "@/app/components/CodeDrawer";
+import {
+  Home,
+  BarChart3,
+  Wallet,
+  FileText,
+  Bell,
+  Settings,
+  HelpCircle,
+  LogOut,
+} from "lucide-react";
 import "../landing_page/index.css";
+import styles from "./page.module.css";
 
 export default function MainPage() {
   const { user, loading, logout } = useAuth();
@@ -16,10 +26,15 @@ export default function MainPage() {
   const [findings, setFindings] = useState<any[]>([]);
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
-  const [activeTab, setActiveTab] = useState<"all" | "cost" | "security">(
+  const [activeTab, setActiveTab] = useState<"all" | "cost" | "security" | "logs">(
     "all",
   );
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
+  const [showAwsForm, setShowAwsForm] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [scanningResource, setScanningResource] = useState<string | null>(null);
+  const [actionHistory, setActionHistory] = useState<any[]>([]);
+  const [costTabScanned, setCostTabScanned] = useState(false);
 
   const [totalSavings, setTotalSavings] = useState(0);
   const [zombiesCount, setZombiesCount] = useState(0);
@@ -39,17 +54,7 @@ export default function MainPage() {
 
   if (loading || !user) {
     return (
-      <div
-        style={{
-          display: "flex",
-          height: "100vh",
-          justifyContent: "center",
-          alignItems: "center",
-          background: "#000",
-          color: "#ede0ce",
-          fontFamily: "monospace",
-        }}
-      >
+      <div className={styles.loadingContainer}>
         LOADING SECURE OPERATIONS CELL...
       </div>
     );
@@ -58,6 +63,13 @@ export default function MainPage() {
   const handleScanSuccess = (liveData: any[]) => {
     setFindings(liveData);
     if (liveData.length > 0) setSelectedFinding(liveData[0]);
+    setScanningResource(null);
+    if (activeTab === "cost") setCostTabScanned(true);
+  };
+
+  const handleScanError = (errorMsg: string) => {
+    setError(errorMsg);
+    setScanningResource(null);
   };
 
   const handleApprove = async (id: string) => {
@@ -70,6 +82,7 @@ export default function MainPage() {
         : "stop_instance";
 
     try {
+      setError(null);
       setApproved((prev) => new Set(prev).add(id));
       const response = await fetch("http://localhost:8000/api/execute", {
         method: "POST",
@@ -86,13 +99,71 @@ export default function MainPage() {
         }),
       });
       if (response.ok) {
+        setActionHistory((prev) => [
+          ...prev,
+          {
+            id: Math.random().toString(36),
+            resourceId: id,
+            action: "Approved",
+            type: targetFinding.type,
+            timestamp: new Date().toLocaleString(),
+          },
+        ]);
         setTimeout(() => {
           setDismissed((prev) => new Set(prev).add(id));
           if (selectedFinding?.id === id) setSelectedFinding(null);
         }, 600);
+      } else {
+        const errData = await response.json();
+        setError(errData.detail || "Failed to execute action");
+        setApproved((prev) => {
+          const newSet = new Set(prev);
+          newSet.delete(id);
+          return newSet;
+        });
       }
     } catch (err) {
-      console.error(err);
+      const errorMsg = err instanceof Error ? err.message : "An unexpected error occurred";
+      setError(errorMsg);
+      setApproved((prev) => {
+        const newSet = new Set(prev);
+        newSet.delete(id);
+        return newSet;
+      });
+    }
+  };
+
+  const handleScanResourceType = async (resourceType: string) => {
+    setScanningResource(resourceType);
+    setError(null);
+    try {
+      const response = await fetch("http://localhost:8000/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          aws_access_key: "demo",
+          aws_secret_key: "12345",
+          region: "us-east-1",
+        }),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        if (data.data && Array.isArray(data.data)) {
+          const filtered = data.data.filter((f: any) =>
+            f.type.toLowerCase().includes(resourceType.toLowerCase())
+          );
+          handleScanSuccess(filtered.length > 0 ? filtered : data.data);
+        } else {
+          handleScanError("Invalid response format from server");
+        }
+      } else {
+        const errData = await response.json();
+        handleScanError(errData.detail || `Failed to scan ${resourceType} resources`);
+      }
+    } catch (err) {
+      const errorMsg = err instanceof Error ? err.message : "An unexpected error occurred";
+      handleScanError(errorMsg);
     }
   };
 
@@ -105,207 +176,481 @@ export default function MainPage() {
   });
 
   return (
-    <div
-      className="frame"
-      style={{
-        background: "#050505",
-        minHeight: "100vh",
-        paddingBottom: "100px",
-      }}
-    >
-      <nav className="nav-bar nav-scrolled">
-        <span className="logo">
-          Tuff{" "}
-          <span style={{ fontSize: "10px", color: "rgba(237,224,206,0.4)" }}>
-            // console
-          </span>
-        </span>
-        <div className="nav-right">
+    <div className={styles.dashboardLayout}>
+      <aside className={styles.sidebar}>
+        <div className={styles.sidebarLogo}>
+          <span className={styles.logoText}>Tuff</span>
+          <span className={styles.logoSubtext}>// console</span>
+        </div>
+
+        <nav className={styles.navLinks}>
+          <button className={`${styles.navItem} ${activeTab === "all" ? styles.active : ""}`} onClick={() => setActiveTab("all")}>
+            <Home size={18} />
+            <span>Overview</span>
+          </button>
+
+          <button className={`${styles.navItem} ${activeTab === "cost" ? styles.active : ""}`} onClick={() => setActiveTab("cost")}>
+            <Wallet size={18} />
+            <span>Cost Explorer</span>
+          </button>
+
+          <button className={`${styles.navItem} ${activeTab === "logs" ? styles.active : ""}`} onClick={() => setActiveTab("logs")}>
+            <BarChart3 size={18} />
+            <span>Logs</span>
+          </button>
+
+          <button className={styles.navItem}>
+            <Bell size={18} />
+            <span>Alerts</span>
+          </button>
+
+          <button className={styles.navItem}>
+            <Settings size={18} />
+            <span>Settings</span>
+          </button>
+        </nav>
+
+        <div className={styles.sidebarBottom}>
+          <button 
+            className={styles.navItem}
+            onClick={() => {
+              const saved = localStorage.getItem("aws_credentials");
+              if (!saved) {
+                setError("AWS credentials not configured. Please connect your AWS account first.");
+                setShowAwsForm(true);
+              } else {
+                setShowAwsForm(true);
+              }
+            }}
+          >
+            <FileText size={18} />
+            <span>Scan Resources</span>
+          </button>
+
+          <button 
+            className={styles.connectAwsBtn}
+            onClick={() => setShowAwsForm(!showAwsForm)}
+          >
+            <Wallet size={18} />
+            <span>Connect AWS Account</span>
+          </button>
+
+          <button className={styles.navItem}>
+            <HelpCircle size={18} />
+            <span>Help</span>
+          </button>
+
           <button
             onClick={logout}
-            className="pill"
-            style={{
-              background: "transparent",
-              border: "1px solid rgba(220,90,70,0.4)",
-              color: "rgba(220,90,70,0.8)",
-              cursor: "pointer",
-            }}
+            className={styles.logoutItem}
           >
-            Terminate Session
+            <LogOut size={18} />
+            <span>Logout</span>
           </button>
+
+          <div className={styles.userCard}>
+            <div className={styles.avatar}>{user?.email?.[0]?.toUpperCase()}</div>
+            <div>
+              <h4>{user?.email?.split("@")[0]}</h4>
+              <p>{user?.email}</p>
+            </div>
+          </div>
         </div>
-      </nav>
+      </aside>
 
-      <MetricsPanel
-        totalSavings={totalSavings}
-        zombiesCount={zombiesCount}
-        hasFindings={findings.length > 0}
-      />
-
-      <div
-        style={{
-          display: "grid",
-          gridTemplateColumns: "320px 1fr",
-          gap: "40px",
-          padding: "0 4%",
-          alignItems: "start",
-        }}
-      >
-        <div style={{ position: "sticky", top: "140px" }}>
-          <AwsConnectForm onScanComplete={handleScanSuccess} />
+      <main className={styles.mainContent}>
+        <div className={styles.topbar}>
+          <h1>
+            {activeTab === "all" && "Cloud Resource Overview"}
+            {activeTab === "cost" && "Cost Explorer"}
+            {activeTab === "logs" && "Previous Actions & Logs"}
+          </h1>
+          <div className={styles.topbarRight}>
+            <button className={styles.dateBtn}>
+              {new Date().toLocaleDateString()}
+            </button>
+          </div>
         </div>
 
-        <div>
-          <TabFilters
-            activeTab={activeTab}
-            setActiveTab={setActiveTab}
-            allCount={findings.filter((f) => !dismissed.has(f.id)).length}
-            costCount={
-              findings.filter(
-                (f) =>
-                  !dismissed.has(f.id) &&
-                  (f.type.includes("EC2") || f.type.includes("Volume")),
-              ).length
-            }
-            securityCount={
-              findings.filter(
-                (f) => !dismissed.has(f.id) && f.type.includes("S3"),
-              ).length
-            }
-          />
-
-          <div
-            style={{
-              display: "grid",
-              gridTemplateColumns: selectedFinding ? "1fr 340px" : "1fr",
-              gap: "24px",
-            }}
-          >
-            <section
-              className="queue-section"
-              style={{
-                padding: "0",
-                background: "transparent",
-                border: "none",
-              }}
+        {error && (
+          <div className={styles.errorBanner}>
+            <div className={styles.errorContent}>
+              <span className={styles.errorIcon}>⚠</span>
+              <span className={styles.errorMessage}>{error}</span>
+            </div>
+            <button
+              className={styles.errorClose}
+              onClick={() => setError(null)}
+              aria-label="Dismiss error"
             >
-              <div className="queue-cols">
-                <span className="col-label">Resource ID</span>
-                <span className="col-label">Classification</span>
-                <span className="col-label">Region</span>
-                <span className="col-label">Waste</span>
-                <span className="col-label">Savings</span>
-                <span className="col-label">Load</span>
-                <span className="col-label">Resolution</span>
+              ✕
+            </button>
+          </div>
+        )}
+
+        {activeTab !== "cost" && activeTab !== "logs" && (
+          <div className={styles.statsGrid}>
+            <div className={styles.card}>
+              <p className={styles.statLabel}>Active Resources</p>
+              <h2 className={styles.statValue}>{findings.length}</h2>
+              <span className={styles.positive}>{filteredFindings.length} requiring action</span>
+            </div>
+
+            <div className={styles.card}>
+              <p className={styles.statLabel}>Total Potential Savings</p>
+              <h2 className={styles.statValue}>${(totalSavings / 1000).toFixed(1)}K</h2>
+              <span className={styles.positive}>▲ Monthly</span>
+            </div>
+
+            <div className={styles.card}>
+              <p className={styles.statLabel}>Dismissed</p>
+              <h2 className={styles.statValue}>{dismissed.size}</h2>
+              <span>Resources managed</span>
+            </div>
+
+            <div className={styles.card}>
+              <p className={styles.statLabel}>Approved</p>
+              <h2 className={styles.statValue}>{approved.size}</h2>
+              <span>Actions processed</span>
+            </div>
+          </div>
+        )}
+
+        {activeTab === "cost" && !costTabScanned && (
+          <div className={styles.resourceCardsPanel}>
+            <h3 className={styles.scannerTitle}>Select Resource Type to Analyze</h3>
+            <div className={styles.resourceCardsGrid}>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "ec2" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("EC2")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>EC2 Instances</div>
+                <div className={styles.cardDesc}>Find idle or underutilized instances</div>
+                {scanningResource === "ec2" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "volume" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("Volume")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>EBS Volumes</div>
+                <div className={styles.cardDesc}>Detect unattached or unused volumes</div>
+                {scanningResource === "volume" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "s3" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("S3")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>S3 Buckets</div>
+                <div className={styles.cardDesc}>Identify misconfigured or public buckets</div>
+                {scanningResource === "s3" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "vpc" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("VPC")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>VPCs</div>
+                <div className={styles.cardDesc}>Find unused VPCs and resources</div>
+                {scanningResource === "vpc" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "rds" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("RDS")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>RDS Databases</div>
+                <div className={styles.cardDesc}>Detect idle database instances</div>
+                {scanningResource === "rds" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+              <button
+                className={`${styles.resourceCard} ${scanningResource === "all" ? styles.scanning : ""}`}
+                onClick={() => handleScanResourceType("all")}
+                disabled={scanningResource !== null}
+              >
+                <div className={styles.cardTitle}>All Resources</div>
+                <div className={styles.cardDesc}>Comprehensive infrastructure scan</div>
+                {scanningResource === "all" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {showAwsForm && (
+          <div className={styles.largeCard}>
+            <div className={styles.cardHeader}>
+              <h3>Connect AWS Account</h3>
+              <button 
+                className={styles.closeBtn}
+                onClick={() => setShowAwsForm(false)}
+              >
+                ✕
+              </button>
+            </div>
+            <AwsConnectForm onScanComplete={handleScanSuccess} />
+          </div>
+        )}
+
+        <div className={styles.chartGrid}>
+          {activeTab === "logs" ? (
+            <div className={`${styles.largeCard} ${styles.logsCard}`}>
+              <div className={styles.cardHeader}>
+                <h3>Action History</h3>
               </div>
-              <div id="findings">
-                {findings.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "80px",
-                      color: "rgba(237,224,206,0.2)",
-                      fontSize: "11px",
-                      textTransform: "uppercase",
-                      border: "1px dashed #222",
-                    }}
-                  >
-                    Awaiting secure cloud execution authorization mapping
-                    coordinates.
+
+              {actionHistory.length === 0 ? (
+                <div className={styles.emptyState}>
+                  No actions recorded yet. Approve or dismiss resources to see history.
+                </div>
+              ) : (
+                <>
+                  <div className={styles.logsHeader}>
+                    <span className={styles.logCol}>Timestamp</span>
+                    <span className={styles.logCol}>Resource ID</span>
+                    <span className={styles.logCol}>Type</span>
+                    <span className={styles.logCol}>Action</span>
                   </div>
-                ) : filteredFindings.length === 0 ? (
-                  <div
-                    style={{
-                      textAlign: "center",
-                      padding: "80px",
-                      color: "rgba(237,224,206,0.4)",
-                      fontSize: "11px",
-                      textTransform: "uppercase",
-                    }}
-                  >
-                    No alerts matched filter profile.
+                  <div className={styles.logsContainer}>
+                    {[...actionHistory].reverse().map((record) => (
+                      <div key={record.id} className={styles.logRow}>
+                        <span className={styles.logCell}>{record.timestamp}</span>
+                        <span className={styles.logCell}>{record.resourceId}</span>
+                        <span className={styles.logCell}>{record.type}</span>
+                        <span className={`${styles.logCell} ${styles[`status${record.action}`]}`}>
+                          {record.action}
+                        </span>
+                      </div>
+                    ))}
                   </div>
-                ) : (
-                  filteredFindings.map((f) => (
-                    <div
-                      key={f.id}
-                      className={`finding ${selectedFinding?.id === f.id ? "active-row-border" : ""}`}
-                      onClick={() => setSelectedFinding(f)}
-                      style={{ cursor: "pointer" }}
-                    >
-                      <div>
+                </>
+              )}
+            </div>
+          ) : (
+            (activeTab !== "cost" || costTabScanned) && (
+              <div className={`${styles.largeCard} ${styles.findingsCard}`}>
+                <div className={styles.cardHeader}>
+                  <h3>Cloud Resources Requiring Action</h3>
+                  <TabFilters
+                    activeTab={activeTab}
+                    setActiveTab={setActiveTab}
+                    allCount={findings.filter((f) => !dismissed.has(f.id)).length}
+                    costCount={
+                      findings.filter(
+                        (f) =>
+                          !dismissed.has(f.id) &&
+                          (f.type.includes("EC2") || f.type.includes("Volume")),
+                      ).length
+                    }
+                    securityCount={
+                      findings.filter(
+                        (f) => !dismissed.has(f.id) && f.type.includes("S3"),
+                      ).length
+                    }
+                  />
+                </div>
+
+                <div className={styles.queueCols}>
+                  <span className={styles.colLabel}>Resource ID</span>
+                  <span className={styles.colLabel}>Type</span>
+                  <span className={styles.colLabel}>Region</span>
+                  <span className={styles.colLabel}>Cost</span>
+                  <span className={styles.colLabel}>Savings</span>
+                  <span className={styles.colLabel}>CPU</span>
+                  <span className={styles.colLabel}>Action</span>
+                </div>
+
+                <div id="findings" className={styles.findingsContainer}>
+                  {findings.length === 0 ? (
+                    <div className={styles.emptyState}>
+                      Awaiting secure cloud execution authorization mapping coordinates.
+                    </div>
+                  ) : filteredFindings.length === 0 ? (
+                    <div className={styles.emptyStateFiltered}>
+                      No alerts matched filter profile.
+                    </div>
+                  ) : (
+                    filteredFindings.map((f) => (
+                      <div
+                        key={f.id}
+                        className={styles.findingRow}
+                        onClick={() => setSelectedFinding(f)}
+                      >
+                        <div className={styles.findingIdWrapper}>
+                          <div className={styles.findingId}>{f.id}</div>
+                          <div className={styles.findingInst}>{f.inst}</div>
+                        </div>
+                        <div>
+                          <span className={styles.badge}>{f.type}</span>
+                        </div>
+                        <div className={styles.findingRegion}>{f.region}</div>
+                        <div className={styles.findingCost}>{f.cur}</div>
+                        <div className={styles.findingSave}>{f.save}</div>
+                        <div className={styles.findingCpu}>{f.cpu}</div>
                         <div
-                          className="finding-id"
-                          style={{
-                            fontSize: "13px",
-                            color: "#fff",
-                            fontFamily: "monospace",
-                          }}
+                          className={styles.actionButtons}
+                          onClick={(e) => e.stopPropagation()}
                         >
-                          {f.id}
-                        </div>
-                        <div className="finding-inst" style={{ opacity: 0.5 }}>
-                          {f.inst}
+                          {approved.has(f.id) ? (
+                            <span className={styles.executingStatus}>
+                              ⚙ EXECUTING...
+                            </span>
+                          ) : (
+                            <>
+                              <button
+                                className={styles.approveBtn}
+                                onClick={() => handleApprove(f.id)}
+                              >
+                                Approve
+                              </button>
+                              <button
+                                className={styles.dismissBtn}
+                                onClick={() => {
+                                  setActionHistory((prev) => [
+                                    ...prev,
+                                    {
+                                      id: Math.random().toString(36),
+                                      resourceId: f.id,
+                                      action: "Dismissed",
+                                      type: f.type,
+                                      timestamp: new Date().toLocaleString(),
+                                    },
+                                  ]);
+                                  setDismissed((prev) => new Set(prev).add(f.id));
+                                }}
+                              >
+                                ✕
+                              </button>
+                            </>
+                          )}
                         </div>
                       </div>
+                    ))
+                  )}
+                </div>
+
+                {selectedFinding && (
+                  <div className={styles.detailPanel}>
+                    <div className={styles.detailHeader}>
                       <div>
-                        <span className="badge">{f.type}</span>
+                        <h2 className={styles.detailTitle}>{selectedFinding.id}</h2>
+                        <p className={styles.detailType}>{selectedFinding.type}</p>
                       </div>
-                      <div className="finding-region">{f.region}</div>
-                      <div className="finding-cost">{f.cur}</div>
-                      <div
-                        className="finding-save"
-                        style={{ color: "#8cb982", fontWeight: "bold" }}
+                      <button 
+                        className={styles.closeBtn}
+                        onClick={() => setSelectedFinding(null)}
+                        aria-label="Close detail panel"
                       >
-                        {f.save}
+                        ✕
+                      </button>
+                    </div>
+
+                    <div className={styles.detailContent}>
+                      <div className={styles.detailSection}>
+                        <h3 className={styles.sectionTitle}>Overview</h3>
+                        <div className={styles.detailGrid}>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>Resource Region</span>
+                            <span className={styles.detailValue}>{selectedFinding.region}</span>
+                          </div>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>Instance Type</span>
+                            <span className={styles.detailValue}>{selectedFinding.inst}</span>
+                          </div>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>Priority</span>
+                            <span className={`${styles.detailValue} ${styles[`priority${selectedFinding.priority || 'medium'}`]}`}>
+                              {selectedFinding.priority?.toUpperCase() || 'MEDIUM'}
+                            </span>
+                          </div>
+                        </div>
                       </div>
-                      <div className="finding-cpu">{f.cpu}</div>
-                      <div
-                        style={{ display: "flex", gap: "6px" }}
-                        onClick={(e) => e.stopPropagation()}
-                      >
-                        {approved.has(f.id) ? (
-                          <span
-                            style={{
-                              fontSize: "10px",
-                              color: "#8cb982",
-                              letterSpacing: ".1em",
-                            }}
-                          >
+
+                      <div className={styles.detailSection}>
+                        <h3 className={styles.sectionTitle}>Cost & Impact</h3>
+                        <div className={styles.detailGrid}>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>Current Monthly Cost</span>
+                            <span className={styles.detailValue}>{selectedFinding.cur}</span>
+                          </div>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>Potential Monthly Savings</span>
+                            <span className={`${styles.detailValue} ${styles.savingsValue}`}>{selectedFinding.save}</span>
+                          </div>
+                          <div className={styles.detailItem}>
+                            <span className={styles.detailLabel}>CPU Utilization</span>
+                            <span className={styles.detailValue}>{selectedFinding.cpu}</span>
+                          </div>
+                        </div>
+                      </div>
+                      <div className={styles.detailSection}>
+                        <h3 className={styles.sectionTitle}>AI Analysis & Insights</h3>
+                        
+                        {selectedFinding.explanation && (
+                          <div className={styles.insightBox}>
+                            <div className={styles.insightLabel}>Issue Explanation</div>
+                            <p className={styles.insightText}>{selectedFinding.explanation}</p>
+                          </div>
+                        )}
+
+                        {selectedFinding.business_impact && (
+                          <div className={styles.insightBox}>
+                            <div className={styles.insightLabel}>Business Impact</div>
+                            <p className={styles.insightText}>{selectedFinding.business_impact}</p>
+                          </div>
+                        )}
+
+                        {selectedFinding.recommended_action && (
+                          <div className={styles.insightBox}>
+                            <div className={styles.insightLabel}>Recommended Action</div>
+                            <p className={styles.insightText}>{selectedFinding.recommended_action}</p>
+                          </div>
+                        )}
+                      </div>
+
+                      <div className={styles.detailActions}>
+                        {approved.has(selectedFinding.id) ? (
+                          <span className={styles.executingStatus}>
                             ⚙ EXECUTING...
                           </span>
                         ) : (
                           <>
                             <button
-                              className="approve-btn"
-                              onClick={() => handleApprove(f.id)}
+                              className={styles.detailApproveBtn}
+                              onClick={() => handleApprove(selectedFinding.id)}
                             >
-                              Approve
+                              Approve & Execute
                             </button>
                             <button
-                              className="dismiss-btn"
-                              onClick={() =>
-                                setDismissed((prev) => new Set(prev).add(f.id))
-                              }
+                              className={styles.detailDismissBtn}
+                              onClick={() => {
+                                setActionHistory((prev) => [
+                                  ...prev,
+                                  {
+                                    id: Math.random().toString(36),
+                                    resourceId: selectedFinding.id,
+                                    action: "Dismissed",
+                                    type: selectedFinding.type,
+                                    timestamp: new Date().toLocaleString(),
+                                  },
+                                ]);
+                                setDismissed((prev) => new Set(prev).add(selectedFinding.id));
+                              }}
                             >
-                              ✕
+                              Dismiss
                             </button>
                           </>
                         )}
                       </div>
                     </div>
-                  ))
+                  </div>
                 )}
               </div>
-            </section>
-
-            <CodeDrawer
-              selectedFinding={selectedFinding}
-              onClose={() => setSelectedFinding(null)}
-            />
-          </div>
+            )
+          )}
         </div>
-      </div>
+      </main>
     </div>
   );
 }
