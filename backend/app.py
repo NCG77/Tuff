@@ -28,6 +28,7 @@ class ScanRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
     region: str = "us-east-1"  
+
 class ExecuteRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
@@ -64,18 +65,20 @@ async def execute_remediation(request: ExecuteRequest):
 
         if request.action_type == "stop_instance":
             ec2 = session.client('ec2')
-            ec2.stop_instances(InstanceIds=[request.resource_id])
+            # InstanceIds strictly requires a Python list [] of strings
+            ec2.stop_instances(InstanceIds=[str(request.resource_id)])
             msg = f"Successfully stopped zombie EC2 instance {request.resource_id}."
 
         elif request.action_type == "delete_volume":
             ec2 = session.client('ec2')
-            ec2.delete_volume(VolumeId=[request.resource_id])
+            # FIX COMPLETE: VolumeId strictly requires a single flat string, not a list
+            ec2.delete_volume(VolumeId=str(request.resource_id))
             msg = f"Successfully purged unattached EBS volume {request.resource_id}."
 
         elif request.action_type == "secure_s3":
             s3 = session.client('s3')
             s3.put_public_access_block(
-                Bucket=request.resource_id,
+                Bucket=str(request.resource_id),
                 PublicAccessBlockConfiguration={
                     'BlockPublicAcls': True,
                     'IgnorePublicAcls': True,
@@ -151,11 +154,11 @@ async def analyze_infrastructure(request: ScanRequest):
             )
             raw_findings = aws_engine.execute_full_scan()
         
-        logger.info(f"📊 Pipeline data ready. Processing {len(raw_findings)} items via Groq Mixtral...")
+        logger.info(f"📊 Pipeline data ready. Processing {len(raw_findings)} items via Groq Engine...")
 
         ai_evaluated_queue = []
 
-        # Stream the mock infrastructure dataset through your teammate's real Groq model code
+        # Stream datasets through your optimized live Llama-3.3 model file configuration
         for finding in raw_findings:
             ai_analysis = explain_finding(finding)
             

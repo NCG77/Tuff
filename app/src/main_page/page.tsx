@@ -24,6 +24,12 @@ export default function MainPage() {
   const [totalSavings, setTotalSavings] = useState(0);
   const [zombiesCount, setZombiesCount] = useState(0);
 
+  // NEW STATE: Capture the real keys dynamically so the action button can reuse them safely
+  const [activeCredentials, setActiveCredentials] = useState<{
+    keyId: string;
+    secretKey: string;
+  } | null>(null);
+
   useEffect(() => {
     if (!loading && !user) router.push("/src/login_page");
   }, [user, loading, router]);
@@ -55,8 +61,15 @@ export default function MainPage() {
     );
   }
 
-  const handleScanSuccess = (liveData: any[]) => {
+  // UPDATED CALLBACK: Pass credentials upwards from the AWS Form component alongside data array
+  const handleScanSuccess = (
+    liveData: any[],
+    credentials?: { keyId: string; secretKey: string },
+  ) => {
     setFindings(liveData);
+    if (credentials) {
+      setActiveCredentials(credentials);
+    }
     if (liveData.length > 0) setSelectedFinding(liveData[0]);
   };
 
@@ -69,14 +82,18 @@ export default function MainPage() {
         ? "secure_s3"
         : "stop_instance";
 
+    // Fallback safely to demo values if the user utilized demo inputs on the onboarding frame panel
+    const keyToSend = activeCredentials?.keyId || "demo";
+    const secretToSend = activeCredentials?.secretKey || "12345";
+
     try {
       setApproved((prev) => new Set(prev).add(id));
       const response = await fetch("http://localhost:8000/api/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          aws_access_key: "demo",
-          aws_secret_key: "12345",
+          aws_access_key: keyToSend, // <-- FIXED: Passes real key dynamic state safely
+          aws_secret_key: secretToSend, // <-- FIXED: Passes real secret key dynamic state safely
           region:
             targetFinding.region === "global"
               ? "us-east-1"
@@ -90,9 +107,21 @@ export default function MainPage() {
           setDismissed((prev) => new Set(prev).add(id));
           if (selectedFinding?.id === id) setSelectedFinding(null);
         }, 600);
+      } else {
+        // Reset approval state indicator if backend endpoint throws a 500 error
+        setApproved((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     } catch (err) {
       console.error(err);
+      setApproved((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
     }
   };
 
@@ -152,7 +181,10 @@ export default function MainPage() {
         }}
       >
         <div style={{ position: "sticky", top: "140px" }}>
-          <AwsConnectForm onScanComplete={handleScanSuccess} />
+          {/* Enhanced handler interface connection parsing hook */}
+          <AwsConnectForm
+            onScanComplete={(data, creds) => handleScanSuccess(data, creds)}
+          />
         </div>
 
         <div>

@@ -1,7 +1,11 @@
 import { useState } from "react";
 
 interface AwsConnectFormProps {
-  onScanComplete: (liveData: any[]) => void;
+  // FIX 1: Update the interface contract to accept the optional credentials object parameter
+  onScanComplete: (
+    liveData: any[],
+    credentials?: { keyId: string; secretKey: string },
+  ) => void;
 }
 
 export default function AwsConnectForm({
@@ -34,7 +38,7 @@ export default function AwsConnectForm({
       const result = await response.json();
 
       if (response.ok && result.status === "success") {
-        onScanComplete(result.data);
+        onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
       } else {
         setError(result.detail || "Failed to analyze cloud environment.");
       }
@@ -115,6 +119,7 @@ export default function AwsConnectForm({
           <option value="us-west-2">US West (Oregon)</option>
           <option value="eu-west-1">Europe (Ireland)</option>
           <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+          <option value="ap-south-1">Asia Pacific (Mumbai)</option>
         </select>
 
         <button
