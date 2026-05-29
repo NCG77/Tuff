@@ -6,6 +6,7 @@ import uvicorn
 from ai_insights import explain_finding
 from aws_engine import AWSEngine
 from pydantic import BaseModel
+from datetime import datetime
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -24,16 +25,33 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# In-memory storage for alerts (in production, use database)
+alert_storage = {
+    "configs": [],
+    "triggered": []
+}
+
 class ScanRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
     region: str = "us-east-1"  
+
 class ExecuteRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
     region: str = "us-east-1"  
     resource_id: str
     action_type: str
+
+class AlertConfigRequest(BaseModel):
+    resourceType: str
+    metric: str
+    threshold: float
+    thresholdType: str
+
+class AlertRequest(BaseModel):
+    findings: list
+    alertConfigs: list
 
 @app.post("/api/execute")
 async def execute_remediation(request: ExecuteRequest):
@@ -100,9 +118,6 @@ async def execute_remediation(request: ExecuteRequest):
 async def analyze_infrastructure(request: ScanRequest):
     try:
         logger.info(f"🚀 Initializing cloud audit for region: {request.region}")
-        
-        # SIMULATION INTERCEPT TRIGGER
-        # If the key provided is a demo string, use simulated infrastructure data
         if request.aws_access_key.lower() in ["demo", "mock", "test"]:
             logger.info("ℹ️ AWS Credentials set to demo mode. Generating simulated infrastructure footprint...")
             raw_findings = [
@@ -143,7 +158,6 @@ async def analyze_infrastructure(request: ScanRequest):
                 }
             ]
         else:
-            # Run the live multi-layered cloud scan if real keys are provided
             aws_engine = AWSEngine(
                 aws_access_key=request.aws_access_key,
                 aws_secret_key=request.aws_secret_key,
@@ -155,7 +169,6 @@ async def analyze_infrastructure(request: ScanRequest):
 
         ai_evaluated_queue = []
 
-        # Stream the mock infrastructure dataset through your teammate's real Groq model code
         for finding in raw_findings:
             ai_analysis = explain_finding(finding)
             
@@ -187,6 +200,114 @@ async def health_check():
         "service": "TUFF Backend",
         "version": "1.0.0"
     }
+
+
+@app.post("/api/alerts/config")
+async def create_alert_config(request: AlertConfigRequest):
+    """
+    Create a new alert configuration
+    """
+    try:
+        alert_config = {
+            "id": str(len(alert_storage["configs"]) + 1),
+            "resourceType": request.resourceType,
+            "metric": request.metric,
+            "threshold": request.threshold,
+            "thresholdType": request.thresholdType,
+            "created_at": datetime.now().isoformat()
+        }
+        alert_storage["configs"].append(alert_config)
+        logger.info(f"✅ Alert config created: {alert_config['id']}")
+        return JSONResponse(content={"status": "success", "alert": alert_config})
+    except Exception as e:
+        logger.error(f"❌ Failed to create alert config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/alerts/config")
+async def get_alert_configs():
+    """
+    Retrieve all alert configurations
+    """
+    try:
+        return JSONResponse(content={"status": "success", "configs": alert_storage["configs"]})
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve alert configs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.delete("/api/alerts/config/{config_id}")
+async def delete_alert_config(config_id: str):
+    """
+    Delete an alert configuration
+    """
+    try:
+        alert_storage["configs"] = [c for c in alert_storage["configs"] if c["id"] != config_id]
+        logger.info(f"✅ Alert config deleted: {config_id}")
+        return JSONResponse(content={"status": "success", "message": f"Alert config {config_id} deleted"})
+    except Exception as e:
+        logger.error(f"❌ Failed to delete alert config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/alerts/evaluate")
+async def evaluate_alerts(request: AlertRequest):
+    """
+    Evaluate findings against alert configurations and return triggered alerts
+    """
+    try:
+        triggered_alerts = []
+        
+        for config in request.alertConfigs:
+            for finding in request.findings:
+                metric_value = 0
+                
+                # Parse metric value from finding
+                if config["metric"].lower() == "cpu":
+                    metric_value = float(finding.get("cpu", "0").replace("%", "")) if finding.get("cpu") else 0
+                elif config["metric"].lower() == "save":
+                    metric_value = float(finding.get("save", "0").replace("$", "").replace("/mo", "")) if finding.get("save") else 0
+                elif config["metric"].lower() == "cur":
+                    metric_value = float(finding.get("cur", "0").replace("$", "").replace("/mo", "")) if finding.get("cur") else 0
+                
+                # Check if threshold is met
+                triggered = False
+                if config["thresholdType"] == "below":
+                    triggered = metric_value < config["threshold"]
+                elif config["thresholdType"] == "above":
+                    triggered = metric_value > config["threshold"]
+                
+                if triggered and config["resourceType"] in finding.get("type", ""):
+                    alert_record = {
+                        "config_id": config.get("id"),
+                        "resource_id": finding.get("id"),
+                        "resource_type": finding.get("type"),
+                        "metric": config["metric"],
+                        "value": metric_value,
+                        "threshold": config["threshold"],
+                        "condition": config["thresholdType"],
+                        "timestamp": datetime.now().isoformat()
+                    }
+                    triggered_alerts.append(alert_record)
+        
+        alert_storage["triggered"] = triggered_alerts
+        logger.info(f"📊 Alert evaluation complete: {len(triggered_alerts)} alerts triggered")
+        return JSONResponse(content={"status": "success", "alerts": triggered_alerts})
+    except Exception as e:
+        logger.error(f"❌ Failed to evaluate alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/alerts/triggered")
+async def get_triggered_alerts():
+    """
+    Retrieve all triggered alerts
+    """
+    try:
+        return JSONResponse(content={"status": "success", "alerts": alert_storage["triggered"]})
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve triggered alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/")

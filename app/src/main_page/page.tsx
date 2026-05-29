@@ -26,7 +26,7 @@ export default function MainPage() {
   const [findings, setFindings] = useState<any[]>([]);
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
-  const [activeTab, setActiveTab] = useState<"all" | "cost" | "security" | "logs">(
+  const [activeTab, setActiveTab] = useState<"all" | "cost" | "security" | "logs" | "alerts">(
     "all",
   );
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
@@ -38,6 +38,17 @@ export default function MainPage() {
 
   const [totalSavings, setTotalSavings] = useState(0);
   const [zombiesCount, setZombiesCount] = useState(0);
+
+  const [alertConfigs, setAlertConfigs] = useState<any[]>([]);
+  const [triggeredAlerts, setTriggeredAlerts] = useState<any[]>([]);
+  const [showAlertForm, setShowAlertForm] = useState(false);
+  const [newAlert, setNewAlert] = useState({
+    resourceType: "EC2",
+    metric: "cpu",
+    threshold: 10,
+    thresholdType: "below",
+    operator: "<",
+  });
 
   useEffect(() => {
     if (!loading && !user) router.push("/src/login_page");
@@ -51,6 +62,60 @@ export default function MainPage() {
     }, 0);
     setTotalSavings(savings);
   }, [findings, dismissed]);
+
+  useEffect(() => {
+    const newTriggeredAlerts: any[] = [];
+    
+    alertConfigs.forEach((config) => {
+      findings.forEach((finding) => {
+        if (!dismissed.has(finding.id)) {
+          const metric = parseFloat(finding[config.metric.toLowerCase()] || 0);
+          let triggered = false;
+
+          if (config.thresholdType === "below") {
+            triggered = metric < config.threshold;
+          } else if (config.thresholdType === "above") {
+            triggered = metric > config.threshold;
+          }
+
+          if (triggered && finding.type.includes(config.resourceType)) {
+            const alertId = `${config.id}-${finding.id}`;
+            const existingAlert = newTriggeredAlerts.find((a) => a.id === alertId);
+            if (!existingAlert) {
+              newTriggeredAlerts.push({
+                id: alertId,
+                configId: config.id,
+                resourceId: finding.id,
+                resourceType: finding.type,
+                metric: config.metric,
+                value: metric,
+                threshold: config.threshold,
+                condition: config.thresholdType,
+                timestamp: new Date().toLocaleString(),
+              });
+            }
+          }
+        }
+      });
+    });
+
+    setTriggeredAlerts(newTriggeredAlerts);
+
+    if (alertConfigs.length > 0 && findings.length > 0) {
+      try {
+        fetch("http://localhost:8000/api/alerts/evaluate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            findings: findings,
+            alertConfigs: alertConfigs,
+          }),
+        }).catch(err => console.log("Backend alert evaluation optional:", err));
+      } catch (err) {
+        console.log("Backend connection not available");
+      }
+    }
+  }, [findings, alertConfigs, dismissed]);
 
   if (loading || !user) {
     return (
@@ -167,6 +232,49 @@ export default function MainPage() {
     }
   };
 
+  const handleAddAlert = () => {
+    if (!newAlert.threshold) {
+      setError("Please set a threshold value");
+      return;
+    }
+    const alert = {
+      id: Math.random().toString(36),
+      ...newAlert,
+    };
+    setAlertConfigs((prev) => [...prev, alert]);
+    
+    try {
+      fetch("http://localhost:8000/api/alerts/config", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(newAlert),
+      }).catch(err => console.log("Backend sync optional:", err));
+    } catch (err) {
+      console.log("Backend connection not available");
+    }
+    
+    setNewAlert({
+      resourceType: "EC2",
+      metric: "cpu",
+      threshold: 10,
+      thresholdType: "below",
+      operator: "<",
+    });
+    setError(null);
+  };
+
+  const handleRemoveAlert = (alertId: string) => {
+    setAlertConfigs((prev) => prev.filter((a) => a.id !== alertId));
+    
+    try {
+      fetch(`http://localhost:8000/api/alerts/config/${alertId}`, {
+        method: "DELETE",
+      }).catch(err => console.log("Backend sync optional:", err));
+    } catch (err) {
+      console.log("Backend connection not available");
+    }
+  };
+
   const filteredFindings = findings.filter((f) => {
     if (dismissed.has(f.id)) return false;
     if (activeTab === "cost")
@@ -199,7 +307,7 @@ export default function MainPage() {
             <span>Logs</span>
           </button>
 
-          <button className={styles.navItem}>
+          <button className={`${styles.navItem} ${activeTab === "alerts" ? styles.active : ""}`} onClick={() => setActiveTab("alerts")}>
             <Bell size={18} />
             <span>Alerts</span>
           </button>
@@ -264,6 +372,7 @@ export default function MainPage() {
             {activeTab === "all" && "Cloud Resource Overview"}
             {activeTab === "cost" && "Cost Explorer"}
             {activeTab === "logs" && "Previous Actions & Logs"}
+            {activeTab === "alerts" && "Alert Configuration & History"}
           </h1>
           <div className={styles.topbarRight}>
             <button className={styles.dateBtn}>
@@ -288,7 +397,7 @@ export default function MainPage() {
           </div>
         )}
 
-        {activeTab !== "cost" && activeTab !== "logs" && (
+        {activeTab !== "cost" && activeTab !== "logs" && activeTab !== "alerts" && (
           <div className={styles.statsGrid}>
             <div className={styles.card}>
               <p className={styles.statLabel}>Active Resources</p>
@@ -303,16 +412,20 @@ export default function MainPage() {
             </div>
 
             <div className={styles.card}>
-              <p className={styles.statLabel}>Dismissed</p>
-              <h2 className={styles.statValue}>{dismissed.size}</h2>
-              <span>Resources managed</span>
-            </div>
-
-            <div className={styles.card}>
               <p className={styles.statLabel}>Approved</p>
               <h2 className={styles.statValue}>{approved.size}</h2>
               <span>Actions processed</span>
             </div>
+
+            <button 
+              className={styles.card}
+              onClick={() => setActiveTab("alerts")}
+              style={{ cursor: "pointer", background: "linear-gradient(135deg, rgba(100, 140, 80, 0.12), rgba(100, 140, 80, 0.06))", border: "1px solid rgba(100, 140, 80, 0.3)" }}
+            >
+              <p className={styles.statLabel}>Alerts</p>
+              <h2 className={styles.statValue}>{alertConfigs.length}</h2>
+              <span className={styles.positive}>{triggeredAlerts.length} triggered</span>
+            </button>
           </div>
         )}
 
@@ -427,6 +540,164 @@ export default function MainPage() {
                 </>
               )}
             </div>
+          ) : activeTab === "alerts" ? (
+            <>
+              <div className={`${styles.largeCard} ${styles.alertConfigCard}`}>
+                <div className={styles.cardHeader}>
+                  <h3>Configure Alerts</h3>
+                  <button
+                    className={styles.addAlertBtn}
+                    onClick={() => setShowAlertForm(!showAlertForm)}
+                  >
+                    {showAlertForm ? "✕ Close" : "+ Add Alert"}
+                  </button>
+                </div>
+
+                {showAlertForm && (
+                  <div className={styles.alertForm}>
+                    <div className={styles.formGroup}>
+                      <label>Resource Type</label>
+                      <select
+                        value={newAlert.resourceType}
+                        onChange={(e) =>
+                          setNewAlert({ ...newAlert, resourceType: e.target.value })
+                        }
+                        className={styles.formInput}
+                      >
+                        <option value="EC2">EC2 Instances</option>
+                        <option value="Volume">EBS Volumes</option>
+                        <option value="S3">S3 Buckets</option>
+                        <option value="RDS">RDS Databases</option>
+                        <option value="VPC">VPCs</option>
+                      </select>
+                    </div>
+
+                    <div className={styles.formGroup}>
+                      <label>Metric</label>
+                      <select
+                        value={newAlert.metric}
+                        onChange={(e) =>
+                          setNewAlert({ ...newAlert, metric: e.target.value })
+                        }
+                        className={styles.formInput}
+                      >
+                        <option value="cpu">CPU Utilization (%)</option>
+                        <option value="save">Monthly Savings ($)</option>
+                        <option value="cur">Current Cost ($)</option>
+                      </select>
+                    </div>
+
+                    <div className={styles.formGroup}>
+                      <label>Condition</label>
+                      <select
+                        value={newAlert.thresholdType}
+                        onChange={(e) =>
+                          setNewAlert({ ...newAlert, thresholdType: e.target.value })
+                        }
+                        className={styles.formInput}
+                      >
+                        <option value="below">Below</option>
+                        <option value="above">Above</option>
+                      </select>
+                    </div>
+
+                    <div className={styles.formGroup}>
+                      <label>Threshold Value</label>
+                      <input
+                        type="number"
+                        value={newAlert.threshold}
+                        onChange={(e) =>
+                          setNewAlert({
+                            ...newAlert,
+                            threshold: parseFloat(e.target.value) || 0,
+                          })
+                        }
+                        className={styles.formInput}
+                        placeholder="Enter threshold value"
+                      />
+                    </div>
+
+                    <button
+                      className={styles.createAlertBtn}
+                      onClick={handleAddAlert}
+                    >
+                      Create Alert
+                    </button>
+                  </div>
+                )}
+
+                <div className={styles.alertConfigList}>
+                  {alertConfigs.length === 0 ? (
+                    <div className={styles.emptyState}>
+                      No alerts configured yet. Create one to get started.
+                    </div>
+                  ) : (
+                    <>
+                      <div className={styles.alertConfigHeader}>
+                        <span className={styles.configCol}>Resource Type</span>
+                        <span className={styles.configCol}>Metric</span>
+                        <span className={styles.configCol}>Condition</span>
+                        <span className={styles.configCol}>Threshold</span>
+                        <span className={styles.configCol}>Action</span>
+                      </div>
+                      {alertConfigs.map((config) => (
+                        <div key={config.id} className={styles.alertConfigRow}>
+                          <span className={styles.configCell}>{config.resourceType}</span>
+                          <span className={styles.configCell}>{config.metric}</span>
+                          <span className={styles.configCell}>{config.thresholdType}</span>
+                          <span className={styles.configCell}>{config.threshold}</span>
+                          <button
+                            className={styles.removeAlertBtn}
+                            onClick={() => handleRemoveAlert(config.id)}
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      ))}
+                    </>
+                  )}
+                </div>
+              </div>
+
+              <div className={`${styles.largeCard} ${styles.alertHistoryCard}`}>
+                <div className={styles.cardHeader}>
+                  <h3>Triggered Alerts ({triggeredAlerts.length})</h3>
+                </div>
+
+                {triggeredAlerts.length === 0 ? (
+                  <div className={styles.emptyState}>
+                    No alerts triggered. All resources within configured thresholds.
+                  </div>
+                ) : (
+                  <>
+                    <div className={styles.alertHistoryHeader}>
+                      <span className={styles.historyCol}>Timestamp</span>
+                      <span className={styles.historyCol}>Resource ID</span>
+                      <span className={styles.historyCol}>Type</span>
+                      <span className={styles.historyCol}>Metric</span>
+                      <span className={styles.historyCol}>Value</span>
+                      <span className={styles.historyCol}>Threshold</span>
+                      <span className={styles.historyCol}>Condition</span>
+                    </div>
+                    <div className={styles.alertHistoryContainer}>
+                      {[...triggeredAlerts].reverse().map((alert) => (
+                        <div key={alert.id} className={styles.alertHistoryRow}>
+                          <span className={styles.historyCell}>{alert.timestamp}</span>
+                          <span className={styles.historyCell}>{alert.resourceId}</span>
+                          <span className={styles.historyCell}>{alert.resourceType}</span>
+                          <span className={styles.historyCell}>{alert.metric}</span>
+                          <span className={styles.historyCell}>{alert.value}</span>
+                          <span className={styles.historyCell}>{alert.threshold}</span>
+                          <span className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}>
+                            {alert.condition}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
+                  </>
+                )}
+              </div>
+            </>
           ) : (
             (activeTab !== "cost" || costTabScanned) && (
               <div className={`${styles.largeCard} ${styles.findingsCard}`}>
