@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
@@ -7,6 +7,13 @@ from ai_insights import explain_finding
 from aws_engine import AWSEngine
 from pydantic import BaseModel
 from datetime import datetime
+import uuid
+from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog
+from sqlalchemy.orm import Session
+
+def format_datetime(dt: datetime) -> str:
+    """Format datetime to ISO format with timezone info"""
+    return dt.isoformat() if isinstance(dt, datetime) else str(dt)
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -25,11 +32,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# In-memory storage for alerts (in production, use database)
-alert_storage = {
-    "configs": [],
-    "triggered": []
-}
+@app.on_event("startup")
+async def startup_event():
+    init_db()
+    logger.info("✅ Database initialized successfully")
 
 class ScanRequest(BaseModel):
     aws_access_key: str
@@ -54,30 +60,19 @@ class AlertRequest(BaseModel):
     alertConfigs: list
 
 @app.post("/api/execute")
-async def execute_remediation(request: ExecuteRequest):
+async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get_db)):
     """
     Receives an approval command from the frontend and uses boto3 
     to physically modify or remediate the target cloud resource.
     """
     try:
         logger.info(f"⚡ Received execution command: {request.action_type} for resource {request.resource_id}")
-
-        # SIMULATION INTERCEPT TRIGGER
-        if "demo" in request.resource_id.lower() or "production" in request.resource_id.lower():
-            logger.info(f"ℹ️ Simulation Mode: Successfully executed action '{request.action_type}' on mock resource {request.resource_id}")
-            return JSONResponse(content={
-                "status": "success", 
-                "message": f"Simulated mitigation '{request.action_type}' applied successfully. Cloud environment optimized."
-            })
-
-        # LIVE BOTO3 EXECUTION ENGINE
         aws_engine = AWSEngine(
             aws_access_key=request.aws_access_key,
             aws_secret_key=request.aws_secret_key,
             region_name=request.region
         )
         
-        # Initialize standard boto3 session clients
         session = aws_engine.session
 
         if request.action_type == "stop_instance":
@@ -107,67 +102,54 @@ async def execute_remediation(request: ExecuteRequest):
             raise HTTPException(status_code=400, detail=f"Unrecognized action type: {request.action_type}")
 
         logger.info(f"✅ Live execution successful: {msg}")
-        return JSONResponse(content={"status": "success", "message": msg})
+        
+        exec_log = ExecutionLog(
+            resource_id=request.resource_id,
+            action_type=request.action_type,
+            result={"status": "success", "message": msg, "timestamp": format_datetime(datetime.utcnow())},
+            execution_status="success"
+        )
+        db.add(exec_log)
+        db.commit()
+        
+        return JSONResponse(content={
+            "status": "success",
+            "message": msg,
+            "timestamp": format_datetime(datetime.utcnow()),
+            "execution_id": exec_log.id
+        })
 
     except Exception as e:
         logger.error(f"❌ Execution failed on resource {request.resource_id}: {str(e)}")
+        
+        exec_log = ExecutionLog(
+            resource_id=request.resource_id,
+            action_type=request.action_type,
+            result={"status": "failed", "error": str(e), "timestamp": format_datetime(datetime.utcnow())},
+            execution_status="failed"
+        )
+        db.add(exec_log)
+        db.commit()
+        
         raise HTTPException(status_code=500, detail=f"Remediation pipeline crashed: {str(e)}")
 
 
 @app.post("/api/analyze")
-async def analyze_infrastructure(request: ScanRequest):
+async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get_db)):
     try:
-        logger.info(f"🚀 Initializing cloud audit for region: {request.region}")
-        if request.aws_access_key.lower() in ["demo", "mock", "test"]:
-            logger.info("ℹ️ AWS Credentials set to demo mode. Generating simulated infrastructure footprint...")
-            raw_findings = [
-                {
-                    "resource_type": "EC2",
-                    "resource_id": "i-0987654321demo",
-                    "issue": "Idle Instance",
-                    "severity": "medium",
-                    "metrics": {
-                        "cpu_avg": 1.8,
-                        "max_cpu_observed": 3.1,
-                        "instance_type": "m5.2xlarge"
-                    },
-                    "region": request.region,
-                    "estimated_monthly_cost": 288
-                },
-                {
-                    "resource_type": "EBS_Volume",
-                    "resource_id": "vol-0abc1234demovol",
-                    "issue": "Unattached Volume",
-                    "severity": "high",
-                    "metrics": {
-                        "size_gb": 1000,
-                        "volume_type": "gp3"
-                    },
-                    "region": request.region,
-                    "estimated_monthly_cost": 80
-                },
-                {
-                    "resource_type": "S3_Bucket",
-                    "resource_id": "tuff-production-sensitive-data",
-                    "issue": "Public Access Block Disabled",
-                    "severity": "critical",
-                    "metrics": {
-                        "public_sharing_risk": "High"
-                    },
-                    "region": "global"
-                }
-            ]
-        else:
-            aws_engine = AWSEngine(
-                aws_access_key=request.aws_access_key,
-                aws_secret_key=request.aws_secret_key,
-                region_name=request.region
-            )
-            raw_findings = aws_engine.execute_full_scan()
+        scan_id = str(uuid.uuid4())
+        logger.info(f"🚀 Initializing cloud audit for region: {request.region} (Scan ID: {scan_id})")
+        aws_engine = AWSEngine(
+            aws_access_key=request.aws_access_key,
+            aws_secret_key=request.aws_secret_key,
+            region_name=request.region
+        )
+        raw_findings = aws_engine.execute_full_scan()
         
         logger.info(f"📊 Pipeline data ready. Processing {len(raw_findings)} items via Groq Mixtral...")
 
         ai_evaluated_queue = []
+        minimal_findings = [] 
 
         for finding in raw_findings:
             ai_analysis = explain_finding(finding)
@@ -186,12 +168,122 @@ async def analyze_infrastructure(request: ScanRequest):
                 "priority": ai_analysis.get("priority", "medium")
             }
             ai_evaluated_queue.append(completed_payload)
+            minimal_findings.append({
+                "id": finding["resource_id"],
+                "res_type": finding["resource_type"],
+                "issue": finding["issue"],
+                "severity": finding["severity"],
+                "cost": finding.get("estimated_monthly_cost", 0),
+                "save": ai_analysis.get("estimated_savings", 0)
+            })
 
-        return JSONResponse(content={"status": "success", "data": ai_evaluated_queue})
+        infra_log = InfrastructureLog(
+            scan_id=scan_id,
+            region=request.region,
+            findings=minimal_findings,
+            findings_count=len(minimal_findings),
+            status="completed"
+        )
+        db.add(infra_log)
+        db.commit()
+        
+        logger.info(f"✅ Infrastructure scan logged to database (Scan ID: {scan_id})")
+        return JSONResponse(content={
+            "status": "success",
+            "data": ai_evaluated_queue,
+            "scan_id": scan_id,
+            "timestamp": format_datetime(datetime.utcnow()),
+            "findings_count": len(minimal_findings)
+        })
 
     except Exception as e:
         logger.error(f"❌ Core infrastructure analysis loop failed: {str(e)}")
+        try:
+            infra_log = InfrastructureLog(
+                scan_id=scan_id,
+                region=request.region,
+                findings=[],
+                findings_count=0,
+                status="failed",
+                error_message=str(e)
+            )
+            db.add(infra_log)
+            db.commit()
+        except:
+            pass
+        raise HTTPException(status_code=500, detail=f"Infrastructure scan failed: {str(e)}")
+
+@app.get("/api/logs/infrastructure")
+async def get_infrastructure_logs(limit: int = 50, db: Session = Depends(get_db)):
+    try:
+        logs = db.query(InfrastructureLog).order_by(InfrastructureLog.timestamp.desc()).limit(limit).all()
+        return JSONResponse(content={
+            "status": "success",
+            "logs": [
+                {
+                    "scan_id": log.scan_id,
+                    "region": log.region,
+                    "findings_count": log.findings_count,
+                    "status": log.status,
+                    "timestamp": format_datetime(log.timestamp),
+                    "error": log.error_message
+                }
+                for log in logs
+            ]
+        })
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve infrastructure logs: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/logs/infrastructure/{scan_id}")
+async def get_scan_details(scan_id: str, db: Session = Depends(get_db)):
+    
+    try:
+        log = db.query(InfrastructureLog).filter(InfrastructureLog.scan_id == scan_id).first()
+        if not log:
+            raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
+        
+        return JSONResponse(content={
+            "status": "success",
+            "scan": {
+                "scan_id": log.scan_id,
+                "region": log.region,
+                "findings_count": log.findings_count,
+                "findings": log.findings,
+                "status": log.status,
+                "timestamp": format_datetime(log.timestamp)
+            }
+        })
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve scan details: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/logs/execution")
+async def get_execution_logs(limit: int = 50, db: Session = Depends(get_db)):
+    try:
+        logs = db.query(ExecutionLog).order_by(ExecutionLog.timestamp.desc()).limit(limit).all()
+        return JSONResponse(content={
+            "status": "success",
+            "logs": [
+                {
+                    "id": log.id,
+                    "resource_id": log.resource_id,
+                    "action_type": log.action_type,
+                    "status": log.execution_status,
+                    "result": log.result,
+                    "timestamp": format_datetime(log.timestamp)
+                }
+                for log in logs
+            ]
+        })
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve execution logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.get("/api/health")
 async def health_check():
@@ -203,46 +295,70 @@ async def health_check():
 
 
 @app.post("/api/alerts/config")
-async def create_alert_config(request: AlertConfigRequest):
-    """
-    Create a new alert configuration
-    """
+async def create_alert_config(request: AlertConfigRequest, db: Session = Depends(get_db)):
+
     try:
-        alert_config = {
-            "id": str(len(alert_storage["configs"]) + 1),
-            "resourceType": request.resourceType,
-            "metric": request.metric,
-            "threshold": request.threshold,
-            "thresholdType": request.thresholdType,
-            "created_at": datetime.now().isoformat()
-        }
-        alert_storage["configs"].append(alert_config)
-        logger.info(f"✅ Alert config created: {alert_config['id']}")
-        return JSONResponse(content={"status": "success", "alert": alert_config})
+        config_id = str(uuid.uuid4())
+        alert_config = AlertConfig(
+            id=config_id,
+            resource_type=request.resourceType,
+            metric=request.metric,
+            threshold=request.threshold,
+            threshold_type=request.thresholdType,
+            active=True
+        )
+        db.add(alert_config)
+        db.commit()
+        db.refresh(alert_config)
+        logger.info(f"✅ Alert config created: {config_id}")
+        return JSONResponse(content={
+            "status": "success",
+            "alert": {
+                "id": alert_config.id,
+                "resourceType": alert_config.resource_type,
+                "metric": alert_config.metric,
+                "threshold": alert_config.threshold,
+                "thresholdType": alert_config.threshold_type,
+                "created_at": format_datetime(alert_config.created_at)
+            }
+        })
     except Exception as e:
         logger.error(f"❌ Failed to create alert config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/alerts/config")
-async def get_alert_configs():
-    """
-    Retrieve all alert configurations
-    """
+async def get_alert_configs(db: Session = Depends(get_db)):
     try:
-        return JSONResponse(content={"status": "success", "configs": alert_storage["configs"]})
+        configs = db.query(AlertConfig).filter(AlertConfig.active == True).all()
+        return JSONResponse(content={
+            "status": "success",
+            "configs": [
+                {
+                    "id": c.id,
+                    "resourceType": c.resource_type,
+                    "metric": c.metric,
+                    "threshold": c.threshold,
+                    "thresholdType": c.threshold_type,
+                    "created_at": format_datetime(c.created_at)
+                }
+                for c in configs
+            ]
+        })
     except Exception as e:
         logger.error(f"❌ Failed to retrieve alert configs: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.delete("/api/alerts/config/{config_id}")
-async def delete_alert_config(config_id: str):
-    """
-    Delete an alert configuration
-    """
+async def delete_alert_config(config_id: str, db: Session = Depends(get_db)):
     try:
-        alert_storage["configs"] = [c for c in alert_storage["configs"] if c["id"] != config_id]
+        config = db.query(AlertConfig).filter(AlertConfig.id == config_id).first()
+        if not config:
+            raise HTTPException(status_code=404, detail=f"Alert config {config_id} not found")
+        
+        config.active = False 
+        db.commit()
         logger.info(f"✅ Alert config deleted: {config_id}")
         return JSONResponse(content={"status": "success", "message": f"Alert config {config_id} deleted"})
     except Exception as e:
@@ -251,10 +367,7 @@ async def delete_alert_config(config_id: str):
 
 
 @app.post("/api/alerts/evaluate")
-async def evaluate_alerts(request: AlertRequest):
-    """
-    Evaluate findings against alert configurations and return triggered alerts
-    """
+async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
     try:
         triggered_alerts = []
         
@@ -262,15 +375,12 @@ async def evaluate_alerts(request: AlertRequest):
             for finding in request.findings:
                 metric_value = 0
                 
-                # Parse metric value from finding
                 if config["metric"].lower() == "cpu":
                     metric_value = float(finding.get("cpu", "0").replace("%", "")) if finding.get("cpu") else 0
                 elif config["metric"].lower() == "save":
                     metric_value = float(finding.get("save", "0").replace("$", "").replace("/mo", "")) if finding.get("save") else 0
                 elif config["metric"].lower() == "cur":
                     metric_value = float(finding.get("cur", "0").replace("$", "").replace("/mo", "")) if finding.get("cur") else 0
-                
-                # Check if threshold is met
                 triggered = False
                 if config["thresholdType"] == "below":
                     triggered = metric_value < config["threshold"]
@@ -278,7 +388,17 @@ async def evaluate_alerts(request: AlertRequest):
                     triggered = metric_value > config["threshold"]
                 
                 if triggered and config["resourceType"] in finding.get("type", ""):
-                    alert_record = {
+                    alert_record = TriggeredAlert(
+                        config_id=config.get("id"),
+                        resource_id=finding.get("id"),
+                        resource_type=finding.get("type"),
+                        metric=config["metric"],
+                        value=metric_value,
+                        threshold=config["threshold"],
+                        condition=config["thresholdType"]
+                    )
+                    db.add(alert_record)
+                    triggered_alerts.append({
                         "config_id": config.get("id"),
                         "resource_id": finding.get("id"),
                         "resource_type": finding.get("type"),
@@ -286,27 +406,40 @@ async def evaluate_alerts(request: AlertRequest):
                         "value": metric_value,
                         "threshold": config["threshold"],
                         "condition": config["thresholdType"],
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    triggered_alerts.append(alert_record)
+                        "timestamp": format_datetime(datetime.utcnow())
+                    })
         
-        alert_storage["triggered"] = triggered_alerts
-        logger.info(f"📊 Alert evaluation complete: {len(triggered_alerts)} alerts triggered")
+        db.commit()
+        logger.info(f"Alert evaluation complete: {len(triggered_alerts)} alerts triggered")
         return JSONResponse(content={"status": "success", "alerts": triggered_alerts})
     except Exception as e:
-        logger.error(f"❌ Failed to evaluate alerts: {str(e)}")
+        logger.error(f"Failed to evaluate alerts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
 @app.get("/api/alerts/triggered")
-async def get_triggered_alerts():
-    """
-    Retrieve all triggered alerts
-    """
+async def get_triggered_alerts(db: Session = Depends(get_db)):
     try:
-        return JSONResponse(content={"status": "success", "alerts": alert_storage["triggered"]})
+        alerts = db.query(TriggeredAlert).order_by(TriggeredAlert.timestamp.desc()).all()
+        return JSONResponse(content={
+            "status": "success",
+            "alerts": [
+                {
+                    "id": a.id,
+                    "config_id": a.config_id,
+                    "resource_id": a.resource_id,
+                    "resource_type": a.resource_type,
+                    "metric": a.metric,
+                    "value": a.value,
+                    "threshold": a.threshold,
+                    "condition": a.condition,
+                    "timestamp": format_datetime(a.timestamp)
+                }
+                for a in alerts
+            ]
+        })
     except Exception as e:
-        logger.error(f"❌ Failed to retrieve triggered alerts: {str(e)}")
+        logger.error(f"Failed to retrieve triggered alerts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 
