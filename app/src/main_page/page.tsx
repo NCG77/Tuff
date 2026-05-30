@@ -26,9 +26,9 @@ export default function MainPage() {
   const [findings, setFindings] = useState<any[]>([]);
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
-  const [activeTab, setActiveTab] = useState<"all" | "cost" | "security" | "logs" | "alerts">(
-    "all",
-  );
+  const [activeTab, setActiveTab] = useState<
+    "all" | "cost" | "security" | "logs" | "alerts"
+  >("all");
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
   const [showAwsForm, setShowAwsForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -49,6 +49,10 @@ export default function MainPage() {
     thresholdType: "below",
     operator: "<",
   });
+  const [activeCredentials, setActiveCredentials] = useState<{
+    keyId: string;
+    secretKey: string;
+  } | null>(null);
 
   useEffect(() => {
     if (!loading && !user) router.push("/src/login_page");
@@ -57,15 +61,20 @@ export default function MainPage() {
   useEffect(() => {
     const activeFindings = findings.filter((f) => !dismissed.has(f.id));
     setZombiesCount(activeFindings.length);
-    const savings = activeFindings.reduce((acc, curr) => {
-      return acc + (parseInt(curr.save.replace(/[^0-9]/g, ""), 10) || 0);
-    }, 0);
-    setTotalSavings(savings);
-  }, [findings, dismissed]);
 
+    const savings = activeFindings.reduce((acc, curr) => {
+      const cleanNumericString = curr.save.replace(/[^0-9.]/g, "");
+
+      const parsedValue = parseFloat(cleanNumericString) || 0;
+
+      return acc + parsedValue;
+    }, 0);
+
+    setTotalSavings(Number(savings.toFixed(2)));
+  }, [findings, dismissed]);
   useEffect(() => {
     const newTriggeredAlerts: any[] = [];
-    
+
     alertConfigs.forEach((config) => {
       findings.forEach((finding) => {
         if (!dismissed.has(finding.id)) {
@@ -80,7 +89,9 @@ export default function MainPage() {
 
           if (triggered && finding.type.includes(config.resourceType)) {
             const alertId = `${config.id}-${finding.id}`;
-            const existingAlert = newTriggeredAlerts.find((a) => a.id === alertId);
+            const existingAlert = newTriggeredAlerts.find(
+              (a) => a.id === alertId,
+            );
             if (!existingAlert) {
               newTriggeredAlerts.push({
                 id: alertId,
@@ -110,7 +121,9 @@ export default function MainPage() {
             findings: findings,
             alertConfigs: alertConfigs,
           }),
-        }).catch(err => console.log("Backend alert evaluation optional:", err));
+        }).catch((err) =>
+          console.log("Backend alert evaluation optional:", err),
+        );
       } catch (err) {
         console.log("Backend connection not available");
       }
@@ -125,11 +138,13 @@ export default function MainPage() {
     );
   }
 
-  const handleScanSuccess = (liveData: any[]) => {
+  const handleScanSuccess = (
+    liveData: any[],
+    credentials?: { keyId: string; secretKey: string },
+  ) => {
     setFindings(liveData);
+    if (credentials) setActiveCredentials(credentials);
     if (liveData.length > 0) setSelectedFinding(liveData[0]);
-    setScanningResource(null);
-    if (activeTab === "cost") setCostTabScanned(true);
   };
 
   const handleScanError = (errorMsg: string) => {
@@ -147,14 +162,16 @@ export default function MainPage() {
         : "stop_instance";
 
     try {
+      const keyToSend = activeCredentials?.keyId || "demo";
+      const secretToSend = activeCredentials?.secretKey || "12345";
       setError(null);
       setApproved((prev) => new Set(prev).add(id));
       const response = await fetch("http://localhost:8000/api/execute", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          aws_access_key: "demo",
-          aws_secret_key: "12345",
+          aws_access_key: keyToSend,
+          aws_secret_key: secretToSend,
           region:
             targetFinding.region === "global"
               ? "us-east-1"
@@ -188,7 +205,8 @@ export default function MainPage() {
         });
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "An unexpected error occurred";
+      const errorMsg =
+        err instanceof Error ? err.message : "An unexpected error occurred";
       setError(errorMsg);
       setApproved((prev) => {
         const newSet = new Set(prev);
@@ -201,34 +219,67 @@ export default function MainPage() {
   const handleScanResourceType = async (resourceType: string) => {
     setScanningResource(resourceType);
     setError(null);
+
+    // 1. Initialize credential and region targets as blank/dynamic states
+    let keyId = activeCredentials?.keyId;
+    let secretKey = activeCredentials?.secretKey;
+    let targetRegion = "";
+    const saved = localStorage.getItem("aws_credentials");
+    if (saved) {
+      try {
+        const parsed = JSON.parse(saved);
+        keyId = keyId || parsed.accessKey;
+        secretKey = secretKey || parsed.secretKey;
+        targetRegion = parsed.region;
+      } catch (e) {
+        console.error("Failed to parse saved credentials:", e);
+      }
+    }
+    if (!targetRegion) {
+      targetRegion =
+        findings.length > 0 && findings[0].region !== "global"
+          ? findings[0].region
+          : "us-east-1";
+    }
+
     try {
       const response = await fetch("http://localhost:8000/api/analyze", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          aws_access_key: "demo",
-          aws_secret_key: "12345",
-          region: "us-east-1",
+          aws_access_key: keyId || "demo",
+          aws_secret_key: secretKey || "12345",
+          region: targetRegion,
         }),
       });
 
       if (response.ok) {
         const data = await response.json();
         if (data.data && Array.isArray(data.data)) {
-          const filtered = data.data.filter((f: any) =>
-            f.type.toLowerCase().includes(resourceType.toLowerCase())
-          );
-          handleScanSuccess(filtered.length > 0 ? filtered : data.data);
+          if (resourceType === "all") {
+            handleScanSuccess(data.data);
+          } else {
+            const filtered = data.data.filter((f: any) =>
+              f.type.toLowerCase().includes(resourceType.toLowerCase()),
+            );
+            handleScanSuccess(filtered.length > 0 ? filtered : data.data);
+          }
+          setCostTabScanned(true);
         } else {
           handleScanError("Invalid response format from server");
         }
       } else {
         const errData = await response.json();
-        handleScanError(errData.detail || `Failed to scan ${resourceType} resources`);
+        handleScanError(
+          errData.detail || `Failed to scan ${resourceType} resources`,
+        );
       }
     } catch (err) {
-      const errorMsg = err instanceof Error ? err.message : "An unexpected error occurred";
+      const errorMsg =
+        err instanceof Error ? err.message : "An unexpected error occurred";
       handleScanError(errorMsg);
+    } finally {
+      setScanningResource(null);
     }
   };
 
@@ -242,17 +293,17 @@ export default function MainPage() {
       ...newAlert,
     };
     setAlertConfigs((prev) => [...prev, alert]);
-    
+
     try {
       fetch("http://localhost:8000/api/alerts/config", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(newAlert),
-      }).catch(err => console.log("Backend sync optional:", err));
+      }).catch((err) => console.log("Backend sync optional:", err));
     } catch (err) {
       console.log("Backend connection not available");
     }
-    
+
     setNewAlert({
       resourceType: "EC2",
       metric: "cpu",
@@ -265,11 +316,11 @@ export default function MainPage() {
 
   const handleRemoveAlert = (alertId: string) => {
     setAlertConfigs((prev) => prev.filter((a) => a.id !== alertId));
-    
+
     try {
       fetch(`http://localhost:8000/api/alerts/config/${alertId}`, {
         method: "DELETE",
-      }).catch(err => console.log("Backend sync optional:", err));
+      }).catch((err) => console.log("Backend sync optional:", err));
     } catch (err) {
       console.log("Backend connection not available");
     }
@@ -292,22 +343,34 @@ export default function MainPage() {
         </div>
 
         <nav className={styles.navLinks}>
-          <button className={`${styles.navItem} ${activeTab === "all" ? styles.active : ""}`} onClick={() => setActiveTab("all")}>
+          <button
+            className={`${styles.navItem} ${activeTab === "all" ? styles.active : ""}`}
+            onClick={() => setActiveTab("all")}
+          >
             <Home size={18} />
             <span>Overview</span>
           </button>
 
-          <button className={`${styles.navItem} ${activeTab === "cost" ? styles.active : ""}`} onClick={() => setActiveTab("cost")}>
+          <button
+            className={`${styles.navItem} ${activeTab === "cost" ? styles.active : ""}`}
+            onClick={() => setActiveTab("cost")}
+          >
             <Wallet size={18} />
             <span>Cost Explorer</span>
           </button>
 
-          <button className={`${styles.navItem} ${activeTab === "logs" ? styles.active : ""}`} onClick={() => setActiveTab("logs")}>
+          <button
+            className={`${styles.navItem} ${activeTab === "logs" ? styles.active : ""}`}
+            onClick={() => setActiveTab("logs")}
+          >
             <BarChart3 size={18} />
             <span>Logs</span>
           </button>
 
-          <button className={`${styles.navItem} ${activeTab === "alerts" ? styles.active : ""}`} onClick={() => setActiveTab("alerts")}>
+          <button
+            className={`${styles.navItem} ${activeTab === "alerts" ? styles.active : ""}`}
+            onClick={() => setActiveTab("alerts")}
+          >
             <Bell size={18} />
             <span>Alerts</span>
           </button>
@@ -319,12 +382,14 @@ export default function MainPage() {
         </nav>
 
         <div className={styles.sidebarBottom}>
-          <button 
+          <button
             className={styles.navItem}
             onClick={() => {
               const saved = localStorage.getItem("aws_credentials");
               if (!saved) {
-                setError("AWS credentials not configured. Please connect your AWS account first.");
+                setError(
+                  "AWS credentials not configured. Please connect your AWS account first.",
+                );
                 setShowAwsForm(true);
               } else {
                 setShowAwsForm(true);
@@ -335,7 +400,7 @@ export default function MainPage() {
             <span>Scan Resources</span>
           </button>
 
-          <button 
+          <button
             className={styles.connectAwsBtn}
             onClick={() => setShowAwsForm(!showAwsForm)}
           >
@@ -348,16 +413,15 @@ export default function MainPage() {
             <span>Help</span>
           </button>
 
-          <button
-            onClick={logout}
-            className={styles.logoutItem}
-          >
+          <button onClick={logout} className={styles.logoutItem}>
             <LogOut size={18} />
             <span>Logout</span>
           </button>
 
           <div className={styles.userCard}>
-            <div className={styles.avatar}>{user?.email?.[0]?.toUpperCase()}</div>
+            <div className={styles.avatar}>
+              {user?.email?.[0]?.toUpperCase()}
+            </div>
             <div>
               <h4>{user?.email?.split("@")[0]}</h4>
               <p>{user?.email}</p>
@@ -397,41 +461,56 @@ export default function MainPage() {
           </div>
         )}
 
-        {activeTab !== "cost" && activeTab !== "logs" && activeTab !== "alerts" && (
-          <div className={styles.statsGrid}>
-            <div className={styles.card}>
-              <p className={styles.statLabel}>Active Resources</p>
-              <h2 className={styles.statValue}>{findings.length}</h2>
-              <span className={styles.positive}>{filteredFindings.length} requiring action</span>
-            </div>
+        {activeTab !== "cost" &&
+          activeTab !== "logs" &&
+          activeTab !== "alerts" && (
+            <div className={styles.statsGrid}>
+              <div className={styles.card}>
+                <p className={styles.statLabel}>Active Resources</p>
+                <h2 className={styles.statValue}>{findings.length}</h2>
+                <span className={styles.positive}>
+                  {filteredFindings.length} requiring action
+                </span>
+              </div>
 
-            <div className={styles.card}>
-              <p className={styles.statLabel}>Total Potential Savings</p>
-              <h2 className={styles.statValue}>${(totalSavings / 1000).toFixed(1)}K</h2>
-              <span className={styles.positive}>▲ Monthly</span>
-            </div>
+              <div className={styles.card}>
+                <p className={styles.statLabel}>Total Potential Savings</p>
+                <h2 className={styles.statValue}>
+                  ${(totalSavings / 1000).toFixed(1)}K
+                </h2>
+                <span className={styles.positive}>▲ Monthly</span>
+              </div>
 
-            <div className={styles.card}>
-              <p className={styles.statLabel}>Approved</p>
-              <h2 className={styles.statValue}>{approved.size}</h2>
-              <span>Actions processed</span>
-            </div>
+              <div className={styles.card}>
+                <p className={styles.statLabel}>Approved</p>
+                <h2 className={styles.statValue}>{approved.size}</h2>
+                <span>Actions processed</span>
+              </div>
 
-            <button 
-              className={styles.card}
-              onClick={() => setActiveTab("alerts")}
-              style={{ cursor: "pointer", background: "linear-gradient(135deg, rgba(100, 140, 80, 0.12), rgba(100, 140, 80, 0.06))", border: "1px solid rgba(100, 140, 80, 0.3)" }}
-            >
-              <p className={styles.statLabel}>Alerts</p>
-              <h2 className={styles.statValue}>{alertConfigs.length}</h2>
-              <span className={styles.positive}>{triggeredAlerts.length} triggered</span>
-            </button>
-          </div>
-        )}
+              <button
+                className={styles.card}
+                onClick={() => setActiveTab("alerts")}
+                style={{
+                  cursor: "pointer",
+                  background:
+                    "linear-gradient(135deg, rgba(100, 140, 80, 0.12), rgba(100, 140, 80, 0.06))",
+                  border: "1px solid rgba(100, 140, 80, 0.3)",
+                }}
+              >
+                <p className={styles.statLabel}>Alerts</p>
+                <h2 className={styles.statValue}>{alertConfigs.length}</h2>
+                <span className={styles.positive}>
+                  {triggeredAlerts.length} triggered
+                </span>
+              </button>
+            </div>
+          )}
 
         {activeTab === "cost" && !costTabScanned && (
           <div className={styles.resourceCardsPanel}>
-            <h3 className={styles.scannerTitle}>Select Resource Type to Analyze</h3>
+            <h3 className={styles.scannerTitle}>
+              Select Resource Type to Analyze
+            </h3>
             <div className={styles.resourceCardsGrid}>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "ec2" ? styles.scanning : ""}`}
@@ -439,8 +518,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>EC2 Instances</div>
-                <div className={styles.cardDesc}>Find idle or underutilized instances</div>
-                {scanningResource === "ec2" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Find idle or underutilized instances
+                </div>
+                {scanningResource === "ec2" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "volume" ? styles.scanning : ""}`}
@@ -448,8 +531,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>EBS Volumes</div>
-                <div className={styles.cardDesc}>Detect unattached or unused volumes</div>
-                {scanningResource === "volume" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Detect unattached or unused volumes
+                </div>
+                {scanningResource === "volume" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "s3" ? styles.scanning : ""}`}
@@ -457,8 +544,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>S3 Buckets</div>
-                <div className={styles.cardDesc}>Identify misconfigured or public buckets</div>
-                {scanningResource === "s3" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Identify misconfigured or public buckets
+                </div>
+                {scanningResource === "s3" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "vpc" ? styles.scanning : ""}`}
@@ -466,8 +557,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>VPCs</div>
-                <div className={styles.cardDesc}>Find unused VPCs and resources</div>
-                {scanningResource === "vpc" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Find unused VPCs and resources
+                </div>
+                {scanningResource === "vpc" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "rds" ? styles.scanning : ""}`}
@@ -475,8 +570,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>RDS Databases</div>
-                <div className={styles.cardDesc}>Detect idle database instances</div>
-                {scanningResource === "rds" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Detect idle database instances
+                </div>
+                {scanningResource === "rds" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
               <button
                 className={`${styles.resourceCard} ${scanningResource === "all" ? styles.scanning : ""}`}
@@ -484,8 +583,12 @@ export default function MainPage() {
                 disabled={scanningResource !== null}
               >
                 <div className={styles.cardTitle}>All Resources</div>
-                <div className={styles.cardDesc}>Comprehensive infrastructure scan</div>
-                {scanningResource === "all" && <div className={styles.cardLoading}>⟳ Scanning...</div>}
+                <div className={styles.cardDesc}>
+                  Comprehensive infrastructure scan
+                </div>
+                {scanningResource === "all" && (
+                  <div className={styles.cardLoading}>⟳ Scanning...</div>
+                )}
               </button>
             </div>
           </div>
@@ -495,7 +598,7 @@ export default function MainPage() {
           <div className={styles.largeCard}>
             <div className={styles.cardHeader}>
               <h3>Connect AWS Account</h3>
-              <button 
+              <button
                 className={styles.closeBtn}
                 onClick={() => setShowAwsForm(false)}
               >
@@ -515,7 +618,8 @@ export default function MainPage() {
 
               {actionHistory.length === 0 ? (
                 <div className={styles.emptyState}>
-                  No actions recorded yet. Approve or dismiss resources to see history.
+                  No actions recorded yet. Approve or dismiss resources to see
+                  history.
                 </div>
               ) : (
                 <>
@@ -528,10 +632,16 @@ export default function MainPage() {
                   <div className={styles.logsContainer}>
                     {[...actionHistory].reverse().map((record) => (
                       <div key={record.id} className={styles.logRow}>
-                        <span className={styles.logCell}>{record.timestamp}</span>
-                        <span className={styles.logCell}>{record.resourceId}</span>
+                        <span className={styles.logCell}>
+                          {record.timestamp}
+                        </span>
+                        <span className={styles.logCell}>
+                          {record.resourceId}
+                        </span>
                         <span className={styles.logCell}>{record.type}</span>
-                        <span className={`${styles.logCell} ${styles[`status${record.action}`]}`}>
+                        <span
+                          className={`${styles.logCell} ${styles[`status${record.action}`]}`}
+                        >
                           {record.action}
                         </span>
                       </div>
@@ -560,7 +670,10 @@ export default function MainPage() {
                       <select
                         value={newAlert.resourceType}
                         onChange={(e) =>
-                          setNewAlert({ ...newAlert, resourceType: e.target.value })
+                          setNewAlert({
+                            ...newAlert,
+                            resourceType: e.target.value,
+                          })
                         }
                         className={styles.formInput}
                       >
@@ -592,7 +705,10 @@ export default function MainPage() {
                       <select
                         value={newAlert.thresholdType}
                         onChange={(e) =>
-                          setNewAlert({ ...newAlert, thresholdType: e.target.value })
+                          setNewAlert({
+                            ...newAlert,
+                            thresholdType: e.target.value,
+                          })
                         }
                         className={styles.formInput}
                       >
@@ -642,10 +758,18 @@ export default function MainPage() {
                       </div>
                       {alertConfigs.map((config) => (
                         <div key={config.id} className={styles.alertConfigRow}>
-                          <span className={styles.configCell}>{config.resourceType}</span>
-                          <span className={styles.configCell}>{config.metric}</span>
-                          <span className={styles.configCell}>{config.thresholdType}</span>
-                          <span className={styles.configCell}>{config.threshold}</span>
+                          <span className={styles.configCell}>
+                            {config.resourceType}
+                          </span>
+                          <span className={styles.configCell}>
+                            {config.metric}
+                          </span>
+                          <span className={styles.configCell}>
+                            {config.thresholdType}
+                          </span>
+                          <span className={styles.configCell}>
+                            {config.threshold}
+                          </span>
                           <button
                             className={styles.removeAlertBtn}
                             onClick={() => handleRemoveAlert(config.id)}
@@ -666,7 +790,8 @@ export default function MainPage() {
 
                 {triggeredAlerts.length === 0 ? (
                   <div className={styles.emptyState}>
-                    No alerts triggered. All resources within configured thresholds.
+                    No alerts triggered. All resources within configured
+                    thresholds.
                   </div>
                 ) : (
                   <>
@@ -682,13 +807,27 @@ export default function MainPage() {
                     <div className={styles.alertHistoryContainer}>
                       {[...triggeredAlerts].reverse().map((alert) => (
                         <div key={alert.id} className={styles.alertHistoryRow}>
-                          <span className={styles.historyCell}>{alert.timestamp}</span>
-                          <span className={styles.historyCell}>{alert.resourceId}</span>
-                          <span className={styles.historyCell}>{alert.resourceType}</span>
-                          <span className={styles.historyCell}>{alert.metric}</span>
-                          <span className={styles.historyCell}>{alert.value}</span>
-                          <span className={styles.historyCell}>{alert.threshold}</span>
-                          <span className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}>
+                          <span className={styles.historyCell}>
+                            {alert.timestamp}
+                          </span>
+                          <span className={styles.historyCell}>
+                            {alert.resourceId}
+                          </span>
+                          <span className={styles.historyCell}>
+                            {alert.resourceType}
+                          </span>
+                          <span className={styles.historyCell}>
+                            {alert.metric}
+                          </span>
+                          <span className={styles.historyCell}>
+                            {alert.value}
+                          </span>
+                          <span className={styles.historyCell}>
+                            {alert.threshold}
+                          </span>
+                          <span
+                            className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}
+                          >
                             {alert.condition}
                           </span>
                         </div>
@@ -706,7 +845,9 @@ export default function MainPage() {
                   <TabFilters
                     activeTab={activeTab}
                     setActiveTab={setActiveTab}
-                    allCount={findings.filter((f) => !dismissed.has(f.id)).length}
+                    allCount={
+                      findings.filter((f) => !dismissed.has(f.id)).length
+                    }
                     costCount={
                       findings.filter(
                         (f) =>
@@ -735,7 +876,8 @@ export default function MainPage() {
                 <div id="findings" className={styles.findingsContainer}>
                   {findings.length === 0 ? (
                     <div className={styles.emptyState}>
-                      Awaiting secure cloud execution authorization mapping coordinates.
+                      Awaiting secure cloud execution authorization mapping
+                      coordinates.
                     </div>
                   ) : filteredFindings.length === 0 ? (
                     <div className={styles.emptyStateFiltered}>
@@ -788,7 +930,9 @@ export default function MainPage() {
                                       timestamp: new Date().toLocaleString(),
                                     },
                                   ]);
-                                  setDismissed((prev) => new Set(prev).add(f.id));
+                                  setDismissed((prev) =>
+                                    new Set(prev).add(f.id),
+                                  );
                                 }}
                               >
                                 ✕
@@ -805,10 +949,14 @@ export default function MainPage() {
                   <div className={styles.detailPanel}>
                     <div className={styles.detailHeader}>
                       <div>
-                        <h2 className={styles.detailTitle}>{selectedFinding.id}</h2>
-                        <p className={styles.detailType}>{selectedFinding.type}</p>
+                        <h2 className={styles.detailTitle}>
+                          {selectedFinding.id}
+                        </h2>
+                        <p className={styles.detailType}>
+                          {selectedFinding.type}
+                        </p>
                       </div>
-                      <button 
+                      <button
                         className={styles.closeBtn}
                         onClick={() => setSelectedFinding(null)}
                         aria-label="Close detail panel"
@@ -822,17 +970,28 @@ export default function MainPage() {
                         <h3 className={styles.sectionTitle}>Overview</h3>
                         <div className={styles.detailGrid}>
                           <div className={styles.detailItem}>
-                            <span className={styles.detailLabel}>Resource Region</span>
-                            <span className={styles.detailValue}>{selectedFinding.region}</span>
+                            <span className={styles.detailLabel}>
+                              Resource Region
+                            </span>
+                            <span className={styles.detailValue}>
+                              {selectedFinding.region}
+                            </span>
                           </div>
                           <div className={styles.detailItem}>
-                            <span className={styles.detailLabel}>Instance Type</span>
-                            <span className={styles.detailValue}>{selectedFinding.inst}</span>
+                            <span className={styles.detailLabel}>
+                              Instance Type
+                            </span>
+                            <span className={styles.detailValue}>
+                              {selectedFinding.inst}
+                            </span>
                           </div>
                           <div className={styles.detailItem}>
                             <span className={styles.detailLabel}>Priority</span>
-                            <span className={`${styles.detailValue} ${styles[`priority${selectedFinding.priority || 'medium'}`]}`}>
-                              {selectedFinding.priority?.toUpperCase() || 'MEDIUM'}
+                            <span
+                              className={`${styles.detailValue} ${styles[`priority${selectedFinding.priority || "medium"}`]}`}
+                            >
+                              {selectedFinding.priority?.toUpperCase() ||
+                                "MEDIUM"}
                             </span>
                           </div>
                         </div>
@@ -842,40 +1001,68 @@ export default function MainPage() {
                         <h3 className={styles.sectionTitle}>Cost & Impact</h3>
                         <div className={styles.detailGrid}>
                           <div className={styles.detailItem}>
-                            <span className={styles.detailLabel}>Current Monthly Cost</span>
-                            <span className={styles.detailValue}>{selectedFinding.cur}</span>
+                            <span className={styles.detailLabel}>
+                              Current Monthly Cost
+                            </span>
+                            <span className={styles.detailValue}>
+                              {selectedFinding.cur}
+                            </span>
                           </div>
                           <div className={styles.detailItem}>
-                            <span className={styles.detailLabel}>Potential Monthly Savings</span>
-                            <span className={`${styles.detailValue} ${styles.savingsValue}`}>{selectedFinding.save}</span>
+                            <span className={styles.detailLabel}>
+                              Potential Monthly Savings
+                            </span>
+                            <span
+                              className={`${styles.detailValue} ${styles.savingsValue}`}
+                            >
+                              {selectedFinding.save}
+                            </span>
                           </div>
                           <div className={styles.detailItem}>
-                            <span className={styles.detailLabel}>CPU Utilization</span>
-                            <span className={styles.detailValue}>{selectedFinding.cpu}</span>
+                            <span className={styles.detailLabel}>
+                              CPU Utilization
+                            </span>
+                            <span className={styles.detailValue}>
+                              {selectedFinding.cpu}
+                            </span>
                           </div>
                         </div>
                       </div>
                       <div className={styles.detailSection}>
-                        <h3 className={styles.sectionTitle}>AI Analysis & Insights</h3>
-                        
+                        <h3 className={styles.sectionTitle}>
+                          AI Analysis & Insights
+                        </h3>
+
                         {selectedFinding.explanation && (
                           <div className={styles.insightBox}>
-                            <div className={styles.insightLabel}>Issue Explanation</div>
-                            <p className={styles.insightText}>{selectedFinding.explanation}</p>
+                            <div className={styles.insightLabel}>
+                              Issue Explanation
+                            </div>
+                            <p className={styles.insightText}>
+                              {selectedFinding.explanation}
+                            </p>
                           </div>
                         )}
 
                         {selectedFinding.business_impact && (
                           <div className={styles.insightBox}>
-                            <div className={styles.insightLabel}>Business Impact</div>
-                            <p className={styles.insightText}>{selectedFinding.business_impact}</p>
+                            <div className={styles.insightLabel}>
+                              Business Impact
+                            </div>
+                            <p className={styles.insightText}>
+                              {selectedFinding.business_impact}
+                            </p>
                           </div>
                         )}
 
                         {selectedFinding.recommended_action && (
                           <div className={styles.insightBox}>
-                            <div className={styles.insightLabel}>Recommended Action</div>
-                            <p className={styles.insightText}>{selectedFinding.recommended_action}</p>
+                            <div className={styles.insightLabel}>
+                              Recommended Action
+                            </div>
+                            <p className={styles.insightText}>
+                              {selectedFinding.recommended_action}
+                            </p>
                           </div>
                         )}
                       </div>
@@ -906,7 +1093,9 @@ export default function MainPage() {
                                     timestamp: new Date().toLocaleString(),
                                   },
                                 ]);
-                                setDismissed((prev) => new Set(prev).add(selectedFinding.id));
+                                setDismissed((prev) =>
+                                  new Set(prev).add(selectedFinding.id),
+                                );
                               }}
                             >
                               Dismiss

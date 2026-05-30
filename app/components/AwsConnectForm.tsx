@@ -1,7 +1,10 @@
 import { useState, useEffect } from "react";
 
 interface AwsConnectFormProps {
-  onScanComplete: (liveData: any[]) => void;
+  onScanComplete: (
+    liveData: any[],
+    credentials?: { keyId: string; secretKey: string },
+  ) => void;
 }
 
 export default function AwsConnectForm({
@@ -19,18 +22,22 @@ export default function AwsConnectForm({
     const saved = localStorage.getItem("aws_credentials");
     if (saved) {
       try {
-        const { accessKey: key, secretKey: secret, region: reg } = JSON.parse(saved);
+        const {
+          accessKey: key,
+          secretKey: secret,
+          region: reg,
+        } = JSON.parse(saved);
         setAccessKey(key);
         setSecretKey(secret);
         setRegion(reg);
-      } catch (err) {
-      }
+        // Bubble credentials upwards immediately on storage mount load
+        onScanComplete([], { keyId: key, secretKey: secret });
+      } catch (err) {}
     }
   }, []);
 
   const handleSaveCredentials = async (e: React.FormEvent) => {
     e.preventDefault();
-    
     if (!accessKey || !secretKey) {
       setError("Access Key and Secret Key are required");
       return;
@@ -43,9 +50,7 @@ export default function AwsConnectForm({
     try {
       const response = await fetch("http://localhost:8000/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           aws_access_key: accessKey,
           aws_secret_key: secretKey,
@@ -56,20 +61,19 @@ export default function AwsConnectForm({
       if (response.ok) {
         localStorage.setItem(
           "aws_credentials",
-          JSON.stringify({
-            accessKey,
-            secretKey,
-            region,
-          })
+          JSON.stringify({ accessKey, secretKey, region }),
         );
         setSuccess("AWS credentials saved successfully!");
+        onScanComplete([], { keyId: accessKey, secretKey: secretKey });
         setTimeout(() => setSuccess(""), 3000);
       } else {
         const result = await response.json();
-        setError(result.detail || "Failed to verify AWS credentials. Please check your access key and secret key.");
+        setError(result.detail || "Failed to verify AWS credentials.");
       }
     } catch (err) {
-      setError("Connection to backend API failed. Unable to verify credentials.");
+      setError(
+        "Connection to backend API failed. Unable to verify credentials.",
+      );
     } finally {
       setSaving(false);
     }
@@ -83,9 +87,7 @@ export default function AwsConnectForm({
     try {
       const response = await fetch("http://localhost:8000/api/analyze", {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           aws_access_key: accessKey,
           aws_secret_key: secretKey,
@@ -96,7 +98,7 @@ export default function AwsConnectForm({
       const result = await response.json();
 
       if (response.ok && result.status === "success") {
-        onScanComplete(result.data);
+        onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
       } else {
         setError(result.detail || "Failed to analyze cloud environment.");
       }
@@ -132,11 +134,28 @@ export default function AwsConnectForm({
       </h3>
 
       {error && (
-        <p style={{ color: "#d43a2a", fontSize: "12px", marginBottom: "12px", fontWeight: 500 }}>{error}</p>
+        <p
+          style={{
+            color: "#d43a2a",
+            fontSize: "12px",
+            marginBottom: "12px",
+            fontWeight: 500,
+          }}
+        >
+          {error}
+        </p>
       )}
-      
       {success && (
-        <p style={{ color: "#648c50", fontSize: "12px", marginBottom: "12px", fontWeight: 500 }}>✓ {success}</p>
+        <p
+          style={{
+            color: "#648c50",
+            fontSize: "12px",
+            marginBottom: "12px",
+            fontWeight: 500,
+          }}
+        >
+          ✓ {success}
+        </p>
       )}
 
       <form
@@ -155,7 +174,6 @@ export default function AwsConnectForm({
             padding: "10px",
             color: "#000000",
             borderRadius: "4px",
-            fontFamily: "inherit",
           }}
         />
         <input
@@ -170,7 +188,6 @@ export default function AwsConnectForm({
             padding: "10px",
             color: "#000000",
             borderRadius: "4px",
-            fontFamily: "inherit",
           }}
         />
         <select
@@ -182,13 +199,13 @@ export default function AwsConnectForm({
             padding: "10px",
             color: "#000000",
             borderRadius: "4px",
-            fontFamily: "inherit",
           }}
         >
           <option value="us-east-1">US East (N. Virginia)</option>
           <option value="us-west-2">US West (Oregon)</option>
           <option value="eu-west-1">Europe (Ireland)</option>
           <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
+          <option value="ap-south-1">Asia Pacific (Mumbai)</option>
         </select>
 
         <div style={{ display: "flex", gap: "12px" }}>
@@ -209,39 +226,31 @@ export default function AwsConnectForm({
               fontSize: "12px",
               transition: "background 0.3s",
             }}
-            onMouseEnter={(e) => {
-              if (!saving) (e.target as HTMLButtonElement).style.background = "#6d5942";
-            }}
-            onMouseLeave={(e) => {
-              if (!saving) (e.target as HTMLButtonElement).style.background = "#8b7355";
-            }}
           >
             {saving ? "VERIFYING..." : "SAVE CREDENTIALS"}
           </button>
-          
+
           <button
             type="button"
             onClick={handleScan}
             disabled={scanning || !accessKey || !secretKey}
             style={{
               flex: 1,
-              background: scanning || !accessKey || !secretKey ? "#d3d3d3" : "#648c50",
+              background:
+                scanning || !accessKey || !secretKey ? "#d3d3d3" : "#648c50",
               color: "#ffffff",
               padding: "12px",
               border: "none",
               borderRadius: "4px",
-              cursor: scanning || !accessKey || !secretKey ? "not-allowed" : "pointer",
+              cursor:
+                scanning || !accessKey || !secretKey
+                  ? "not-allowed"
+                  : "pointer",
               textTransform: "uppercase",
               fontWeight: "bold",
               letterSpacing: ".1em",
               fontSize: "12px",
               transition: "background 0.3s",
-            }}
-            onMouseEnter={(e) => {
-              if (!scanning && accessKey && secretKey) (e.target as HTMLButtonElement).style.background = "#4d7a3d";
-            }}
-            onMouseLeave={(e) => {
-              if (!scanning && accessKey && secretKey) (e.target as HTMLButtonElement).style.background = "#648c50";
             }}
           >
             {scanning ? "SCANNING..." : "SCAN NOW →"}
