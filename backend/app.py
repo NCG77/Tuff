@@ -84,6 +84,16 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
             ec2 = session.client('ec2')
             ec2.delete_volume(VolumeId=request.resource_id)
             msg = f"Successfully purged unattached EBS volume {request.resource_id}."
+        
+        elif request.action_type =="delete_vpc":
+            ec2=session.client('ec2')
+            ec2.delete_vpc(VpcId=str(request.resource_id))
+            msg= f"Successfully deleted misconfigured VPC {request.resource_id}."
+        
+        elif request.action_type == "delete_rds":
+            rds = session.client('rds')
+            rds.delete_db_instance(DBInstanceIdentifier=str(request.resource_id), SkipFinalSnapshot=True)
+            msg = f"Successfully deleted underutilized RDS instance {request.resource_id}."
 
         elif request.action_type == "secure_s3":
             s3 = session.client('s3')
