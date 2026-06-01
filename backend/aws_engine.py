@@ -193,6 +193,54 @@ class AWSEngine:
                 })
         return rds_findings
 
+    def scan_scaling_candidates(self) -> list:
+        ec2_client = self.session.client('ec2')
+        cw_client = self.session.client('cloudwatch')
+        findings=[]
+
+        response= ec2_client.describe_instances(
+            Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
+        )
+
+        for reservation in response.get('Reservations', []):
+            for instance in reservation.get('Instances',[]):
+                instance_id = instance['InstanceId']
+                current_type = instance['InstanceType']
+
+                # Grab a week of average cpu data
+                metric_stats = cw_client.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='CPUUtilization',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                    StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                    EndTime=datetime.now(timezone.utc),
+                    Period=86400,
+                    Statistics=['Average']
+                )
+                datapoints = metric_stats.get('Datapoints', [])
+                if datapoints:
+                    averages = [d['Average'] for d in datapoints]
+                    avg_cpu = sum(averages) / len(averages)
+
+                    # If average CPU is under 10%, it may be a scaling candidate
+                    if avg_cpu < 10.0 and not current_type.startswith('nano' or 'micro'):
+                        findings.append({
+                            "resource_type": "EC2",
+                            "resource_id": instance_id,
+                            "issue": "Scaling Candidate",
+                            "severity": "medium",
+                            "metrics": {
+                                "average_cpu": round(avg_cpu, 2),
+                                "current_instance_type": current_type
+                            },
+                            "region": self.region,
+                            "estimated_monthly_cost": 120, # Fixed standard metric format hook
+                            "recommendation": f"Consider resizing this instance to a smaller type to optimize costs."
+                        })
+        return findings
+
+            
+
     def execute_full_scan(self) -> list:
         all_findings = []
         all_findings.extend(self.scan_zombie_ec2())

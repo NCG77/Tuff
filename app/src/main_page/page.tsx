@@ -155,11 +155,14 @@ export default function MainPage() {
   const handleApprove = async (id: string) => {
     const targetFinding = findings.find((f) => f.id === id);
     if (!targetFinding) return;
-    let actionType = targetFinding.type.includes("Volume")
-      ? "delete_volume"
-      : targetFinding.type.includes("S3")
-        ? "secure_s3"
-        : "stop_instance";
+    let actionType = "stop_instance";
+    if (targetFinding.type.includes("Volume")) {
+      actionType = "delete_volume";
+    } else if (targetFinding.type.includes("S3")) {
+      actionType = "secure_s3";
+    } else if (targetFinding.type.includes("Scaling")) {
+      actionType = "scale_instance";
+    }
 
     try {
       const keyToSend = activeCredentials?.keyId || "demo";
@@ -178,6 +181,7 @@ export default function MainPage() {
               : targetFinding.region,
           resource_id: id,
           action_type: actionType,
+          target_type: targetFinding.metrics?.suggested_type || "t3.micro",
         }),
       });
       if (response.ok) {
@@ -915,7 +919,9 @@ export default function MainPage() {
                                 className={styles.approveBtn}
                                 onClick={() => handleApprove(f.id)}
                               >
-                                Approve
+                                {f.type.includes("Scaling")
+                                  ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
+                                  : "Approve"}
                               </button>
                               <button
                                 className={styles.dismissBtn}
@@ -1078,7 +1084,9 @@ export default function MainPage() {
                               className={styles.detailApproveBtn}
                               onClick={() => handleApprove(selectedFinding.id)}
                             >
-                              Approve & Execute
+                              {selectedFinding.type.includes("Scaling")
+                                ? `Approve Rightsizing (${selectedFinding.metrics?.suggested_type || "t3.micro"})`
+                                : "Approve & Execute"}
                             </button>
                             <button
                               className={styles.detailDismissBtn}
