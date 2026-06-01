@@ -221,23 +221,6 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
         db.commit()
         
         logger.info(f"✅ Infrastructure scan logged to database (Scan ID: {scan_id})")
-        mock_scaling_finding = {
-            "id": "i-09f8e7d6c5b4a3f21", # Replace with a real stopped/running instance ID from your account if you want a live test
-            "type": "Over-provisioned Instance (EC2_Scaling)",
-            "inst": "t3.xlarge",
-            "region": "ap-south-1", # Mumbai
-            "cur": "$133.24/mo",
-            "save": "$128.48/mo",
-            "cpu": "1.8%",
-            "explanation": "This instance has maintained an average CPU utilization of 1.8% over the past 7 days, indicating it is heavily over-provisioned for its current workload.",
-            "business_impact": "You are actively burning redundant capital on unutilized compute capacity.",
-            "recommended_action": "Programmatically downsize this asset to a t3.micro to trim excess operational costs.",
-            "priority": "high",
-            "metrics": {
-                "suggested_type": "t3.micro"
-            }
-        }
-        ai_evaluated_queue.append(mock_scaling_finding)
         return JSONResponse(content={
             "status": "success",
             "data": ai_evaluated_queue,
