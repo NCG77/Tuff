@@ -17,6 +17,7 @@ export default function AwsConnectForm({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
+  const [generatingPolicy, setGeneratingPolicy] = useState(false);
 
   useEffect(() => {
     const saved = localStorage.getItem("aws_credentials");
@@ -30,7 +31,6 @@ export default function AwsConnectForm({
         setAccessKey(key);
         setSecretKey(secret);
         setRegion(reg);
-        // Bubble credentials upwards immediately on storage mount load
         onScanComplete([], { keyId: key, secretKey: secret });
       } catch (err) {}
     }
@@ -106,6 +106,43 @@ export default function AwsConnectForm({
       setError("Connection to backend API failed.");
     } finally {
       setScanning(false);
+    }
+  };
+
+  const handleGenerateIAMPolicy = async () => {
+    setGeneratingPolicy(true);
+    setError("");
+
+    try {
+      const response = await fetch("http://localhost:8000/api/generate-iam-policy", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+      });
+
+      if (response.ok) {
+        const result = await response.json();
+        const policy = result.policy;
+        const dataStr = JSON.stringify(policy, null, 2);
+        const dataBlob = new Blob([dataStr], { type: "application/json" });
+        const url = URL.createObjectURL(dataBlob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = `tuff-iam-policy-${new Date().toISOString().split("T")[0]}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(url);
+
+        setSuccess("IAM policy downloaded successfully! Use this policy to create an IAM user with minimum required permissions.");
+        setTimeout(() => setSuccess(""), 5000);
+      } else {
+        const errData = await response.json();
+        setError(errData.detail || "Failed to generate IAM policy");
+      }
+    } catch (err) {
+      setError("Connection to backend API failed. Please ensure the backend is running.");
+    } finally {
+      setGeneratingPolicy(false);
     }
   };
 
@@ -256,6 +293,29 @@ export default function AwsConnectForm({
             {scanning ? "SCANNING..." : "SCAN NOW →"}
           </button>
         </div>
+
+        <button
+          type="button"
+          onClick={handleGenerateIAMPolicy}
+          disabled={generatingPolicy}
+          style={{
+            width: "100%",
+            background: generatingPolicy ? "#d3d3d3" : "#5a7a9e",
+            color: "#ffffff",
+            padding: "12px",
+            border: "none",
+            borderRadius: "4px",
+            cursor: generatingPolicy ? "not-allowed" : "pointer",
+            textTransform: "uppercase",
+            fontWeight: "bold",
+            letterSpacing: ".1em",
+            fontSize: "12px",
+            transition: "background 0.3s",
+            marginTop: "8px",
+          }}
+        >
+          {generatingPolicy ? "⟳ GENERATING..." : "GENERATE IAM POLICY"}
+        </button>
       </form>
     </div>
   );

@@ -8,7 +8,7 @@ from aws_engine import AWSEngine
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog
+from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog
 from sqlalchemy.orm import Session
 
 def format_datetime(dt: datetime) -> str:
@@ -48,16 +48,19 @@ class ExecuteRequest(BaseModel):
     region: str = "us-east-1"  
     resource_id: str
     action_type: str
+    user_id: str = "unknown"
 
 class AlertConfigRequest(BaseModel):
     resourceType: str
     metric: str
     threshold: float
     thresholdType: str
+    user_id: str
 
 class AlertRequest(BaseModel):
     findings: list
     alertConfigs: list
+    user_id: str
 
 @app.post("/api/execute")
 async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get_db)):
@@ -137,6 +140,7 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         logger.info(f"✅ Live execution successful: {msg}")
         
         exec_log = ExecutionLog(
+            user_id=request.user_id,
             resource_id=request.resource_id,
             action_type=request.action_type,
             result={"status": "success", "message": msg, "timestamp": format_datetime(datetime.utcnow())},
@@ -156,6 +160,7 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         logger.error(f"❌ Execution failed on resource {request.resource_id}: {str(e)}")
         
         exec_log = ExecutionLog(
+            user_id=request.user_id,
             resource_id=request.resource_id,
             action_type=request.action_type,
             result={"status": "failed", "error": str(e), "timestamp": format_datetime(datetime.utcnow())},
@@ -327,6 +332,106 @@ async def health_check():
     }
 
 
+@app.post("/api/generate-iam-policy")
+async def generate_iam_policy():
+    from ai_insights import client
+    import json
+    
+    try:
+        logger.info("Generating AI-powered IAM policy...")
+        
+        prompt = """Generate a comprehensive AWS IAM policy JSON for a cloud optimization tool called TUFF that:
+        1. Scans EC2 instances, EBS volumes, RDS databases, S3 buckets, and VPCs
+        2. Can stop/start EC2 instances
+        3. Can delete unattached EBS volumes
+        4. Can delete RDS instances
+        5. Can secure S3 buckets with Public Access Block
+        6. Can delete VPCs
+        7. Can modify instance types
+        8. Can read CloudWatch metrics
+        
+        Respond ONLY with valid JSON in this exact format:
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "EC2Operations",
+                    "Effect": "Allow",
+                    "Action": ["action1", "action2"],
+                    "Resource": "*"
+                }
+            ]
+        }
+        
+        Include all necessary actions for scanning and remediating cloud resources. Be comprehensive."""
+        
+        response = client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are an AWS IAM security expert. You must respond exclusively with valid JSON policy documents. Only output JSON, nothing else."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            response_format={"type": "json_object"},
+            temperature=0.1
+        )
+        
+        response_text = response.choices[0].message.content
+        policy = json.loads(response_text)
+        
+        logger.info("IAM policy generated successfully")
+        return JSONResponse(content={
+            "status": "success",
+            "policy": policy,
+            "timestamp": format_datetime(datetime.utcnow()),
+            "description": "Minimum required IAM permissions for TUFF operations"
+        })
+        
+    except Exception as e:
+        logger.error(f"Failed to generate IAM policy: {str(e)}")
+        fallback_policy = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "EC2FullAccess",
+                    "Effect": "Allow",
+                    "Action": ["ec2:*"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "RDSFullAccess",
+                    "Effect": "Allow",
+                    "Action": ["rds:*"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "S3FullAccess",
+                    "Effect": "Allow",
+                    "Action": ["s3:*"],
+                    "Resource": "*"
+                },
+                {
+                    "Sid": "CloudWatchMetrics",
+                    "Effect": "Allow",
+                    "Action": ["cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics"],
+                    "Resource": "*"
+                }
+            ]
+        }
+        return JSONResponse(content={
+            "status": "success",
+            "policy": fallback_policy,
+            "timestamp": format_datetime(datetime.utcnow()),
+            "description": "Fallback IAM permissions for TUFF operations",
+            "note": "Full permissions recommended. Customize as needed based on your security requirements."
+        })
+
+
 @app.post("/api/alerts/config")
 async def create_alert_config(request: AlertConfigRequest, db: Session = Depends(get_db)):
 
@@ -334,6 +439,7 @@ async def create_alert_config(request: AlertConfigRequest, db: Session = Depends
         config_id = str(uuid.uuid4())
         alert_config = AlertConfig(
             id=config_id,
+            user_id=request.user_id,
             resource_type=request.resourceType,
             metric=request.metric,
             threshold=request.threshold,
@@ -343,7 +449,7 @@ async def create_alert_config(request: AlertConfigRequest, db: Session = Depends
         db.add(alert_config)
         db.commit()
         db.refresh(alert_config)
-        logger.info(f"✅ Alert config created: {config_id}")
+        logger.info(f"✅ Alert config created for user {request.user_id}: {config_id}")
         return JSONResponse(content={
             "status": "success",
             "alert": {
@@ -361,9 +467,12 @@ async def create_alert_config(request: AlertConfigRequest, db: Session = Depends
 
 
 @app.get("/api/alerts/config")
-async def get_alert_configs(db: Session = Depends(get_db)):
+async def get_alert_configs(user_id: str, db: Session = Depends(get_db)):
     try:
-        configs = db.query(AlertConfig).filter(AlertConfig.active == True).all()
+        configs = db.query(AlertConfig).filter(
+            AlertConfig.active == True,
+            AlertConfig.user_id == user_id
+        ).all()
         return JSONResponse(content={
             "status": "success",
             "configs": [
@@ -399,6 +508,94 @@ async def delete_alert_config(config_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+class ActionLogRequest(BaseModel):
+    user_id: str
+    resource_id: str
+    action: str
+    resource_type: str
+
+
+@app.post("/api/action-logs")
+async def save_action_log(request: ActionLogRequest, db: Session = Depends(get_db)):
+    """Save action logs (approve/dismiss) for user history"""
+    try:
+        log_id = str(uuid.uuid4())
+        action_log = ActionLog(
+            id=log_id,
+            user_id=request.user_id,
+            resource_id=request.resource_id,
+            action=request.action,
+            resource_type=request.resource_type
+        )
+        db.add(action_log)
+        db.commit()
+        logger.info(f"✅ Action log saved for user {request.user_id}: {log_id}")
+        return JSONResponse(content={
+            "status": "success",
+            "log_id": log_id,
+            "timestamp": format_datetime(datetime.utcnow())
+        })
+    except Exception as e:
+        logger.error(f"❌ Failed to save action log: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/action-logs")
+async def get_action_logs(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
+    """Fetch all action logs for a specific user"""
+    try:
+        logs = db.query(ActionLog).filter(
+            ActionLog.user_id == user_id
+        ).order_by(ActionLog.timestamp.desc()).limit(limit).all()
+        
+        return JSONResponse(content={
+            "status": "success",
+            "logs": [
+                {
+                    "id": log.id,
+                    "resource_id": log.resource_id,
+                    "action": log.action,
+                    "type": log.resource_type,
+                    "timestamp": format_datetime(log.timestamp)
+                }
+                for log in logs
+            ]
+        })
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve action logs: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/api/alerts/triggered")
+async def get_triggered_alerts(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
+    """Fetch all triggered alerts for a specific user"""
+    try:
+        alerts = db.query(TriggeredAlert).filter(
+            TriggeredAlert.user_id == user_id
+        ).order_by(TriggeredAlert.timestamp.desc()).limit(limit).all()
+        
+        return JSONResponse(content={
+            "status": "success",
+            "alerts": [
+                {
+                    "id": alert.id,
+                    "configId": alert.config_id,
+                    "resourceId": alert.resource_id,
+                    "resourceType": alert.resource_type,
+                    "metric": alert.metric,
+                    "value": alert.value,
+                    "threshold": alert.threshold,
+                    "condition": alert.condition,
+                    "timestamp": format_datetime(alert.timestamp)
+                }
+                for alert in alerts
+            ]
+        })
+    except Exception as e:
+        logger.error(f"❌ Failed to retrieve triggered alerts: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/api/alerts/evaluate")
 async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
     try:
@@ -422,6 +619,7 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
                 
                 if triggered and config["resourceType"] in finding.get("type", ""):
                     alert_record = TriggeredAlert(
+                        user_id=request.user_id,
                         config_id=config.get("id"),
                         resource_id=finding.get("id"),
                         resource_type=finding.get("type"),
@@ -443,36 +641,10 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
                     })
         
         db.commit()
-        logger.info(f"Alert evaluation complete: {len(triggered_alerts)} alerts triggered")
+        logger.info(f"Alert evaluation complete for user {request.user_id}: {len(triggered_alerts)} alerts triggered")
         return JSONResponse(content={"status": "success", "alerts": triggered_alerts})
     except Exception as e:
         logger.error(f"Failed to evaluate alerts: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/api/alerts/triggered")
-async def get_triggered_alerts(db: Session = Depends(get_db)):
-    try:
-        alerts = db.query(TriggeredAlert).order_by(TriggeredAlert.timestamp.desc()).all()
-        return JSONResponse(content={
-            "status": "success",
-            "alerts": [
-                {
-                    "id": a.id,
-                    "config_id": a.config_id,
-                    "resource_id": a.resource_id,
-                    "resource_type": a.resource_type,
-                    "metric": a.metric,
-                    "value": a.value,
-                    "threshold": a.threshold,
-                    "condition": a.condition,
-                    "timestamp": format_datetime(a.timestamp)
-                }
-                for a in alerts
-            ]
-        })
-    except Exception as e:
-        logger.error(f"Failed to retrieve triggered alerts: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 

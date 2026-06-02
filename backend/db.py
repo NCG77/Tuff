@@ -19,6 +19,7 @@ class AlertConfig(Base):
     __tablename__ = "alert_configs"
     
     id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
     resource_type = Column(String, nullable=False)
     metric = Column(String, nullable=False)
     threshold = Column(Float, nullable=False)
@@ -30,6 +31,7 @@ class AlertConfig(Base):
 class TriggeredAlert(Base):
     __tablename__ = "triggered_alerts"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
     config_id = Column(String, nullable=False)
     resource_id = Column(String, nullable=False)
     resource_type = Column(String, nullable=False)
@@ -57,11 +59,23 @@ class ExecutionLog(Base):
     __tablename__ = "execution_logs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(String, nullable=False)
     resource_id = Column(String, nullable=False)
     action_type = Column(String, nullable=False)
     result = Column(JSON, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
     execution_status = Column(String, default="success")
+
+
+class ActionLog(Base):
+    __tablename__ = "action_logs"
+    
+    id = Column(String, primary_key=True)
+    user_id = Column(String, nullable=False)
+    resource_id = Column(String, nullable=False)
+    action = Column(String, nullable=False)
+    resource_type = Column(String, nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
 
 def init_db():
     Base.metadata.create_all(bind=engine)
