@@ -1,4 +1,5 @@
 import { useState, useEffect } from "react";
+import { api } from "@/app/lib/config";
 
 interface AwsConnectFormProps {
   onScanComplete: (
@@ -48,7 +49,7 @@ export default function AwsConnectForm({
     setSuccess("");
 
     try {
-      const response = await fetch("http://localhost:8000/api/analyze", {
+      const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -85,7 +86,7 @@ export default function AwsConnectForm({
     setError("");
 
     try {
-      const response = await fetch("http://localhost:8000/api/analyze", {
+      const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -114,7 +115,7 @@ export default function AwsConnectForm({
     setError("");
 
     try {
-      const response = await fetch("http://localhost:8000/api/generate-iam-policy", {
+      const response = await fetch(api.endpoints.generateIAMPolicy, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
       });
