@@ -50,9 +50,6 @@ const nextConfig: NextConfig = {
   // Optimize performance
   compress: true,
   poweredByHeader: false,
-  
-  // SWR config for better caching
-  swcMinify: true,
 };
 
 export default nextConfig;
