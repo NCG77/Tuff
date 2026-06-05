@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 import logging
 import uvicorn
+import os
+from dotenv import load_dotenv
 from ai_insights import explain_finding
 from aws_engine import AWSEngine
 from pydantic import BaseModel
@@ -10,6 +12,9 @@ from datetime import datetime
 import uuid
 from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog
 from sqlalchemy.orm import Session
+
+# Load environment variables
+load_dotenv()
 
 def format_datetime(dt: datetime) -> str:
     """Format datetime to ISO format with timezone info"""
@@ -24,9 +29,16 @@ app = FastAPI(
     version="1.0.0"
 )
 
+# CORS configuration from environment
+frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
+environment = os.getenv("ENVIRONMENT", "development")
+
+# More restrictive CORS in production
+cors_origins = [frontend_url] if environment == "production" else ["*"]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=cors_origins,
     allow_methods=["*"],
     allow_credentials=True,
     allow_headers=["*"],

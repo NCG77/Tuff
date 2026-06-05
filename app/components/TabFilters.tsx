@@ -1,8 +1,8 @@
 "use client";
 
 interface TabFiltersProps {
-  activeTab: "all" | "cost" | "security";
-  setActiveTab: (tab: "all" | "cost" | "security") => void;
+  activeTab: "all" | "cost" | "security" | "logs" | "alerts";
+  setActiveTab: (tab: "all" | "cost" | "security" | "logs" | "alerts") => void;
   allCount: number;
   costCount: number;
   securityCount: number;

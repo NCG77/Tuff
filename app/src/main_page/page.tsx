@@ -19,6 +19,7 @@ import {
   HelpCircle,
   LogOut,
 } from "lucide-react";
+import { api, devLog, devError } from "@/app/lib/config";
 import "../landing_page/index.css";
 import styles from "./page.module.css";
 
@@ -66,14 +67,14 @@ export default function MainPage() {
 
       try {
         // Fetch alerts
-        const alertsRes = await fetch(`http://localhost:8000/api/alerts/config?user_id=${user.email}`);
+        const alertsRes = await fetch(`${api.endpoints.alertsConfig}?user_id=${user.email}`);
         if (alertsRes.ok) {
           const alertsData = await alertsRes.json();
           setAlertConfigs(alertsData.configs || []);
         }
 
         // Fetch action history
-        const logsRes = await fetch(`http://localhost:8000/api/action-logs?user_id=${user.email}`);
+        const logsRes = await fetch(`${api.endpoints.actionLogs}?user_id=${user.email}`);
         if (logsRes.ok) {
           const logsData = await logsRes.json();
           const formattedLogs = logsData.logs.map((log: any) => ({
@@ -87,13 +88,13 @@ export default function MainPage() {
         }
 
         // Fetch triggered alerts
-        const triggeredRes = await fetch(`http://localhost:8000/api/alerts/triggered?user_id=${user.email}`);
+        const triggeredRes = await fetch(`${api.endpoints.alertsTriggered}?user_id=${user.email}`);
         if (triggeredRes.ok) {
           const triggeredData = await triggeredRes.json();
           setTriggeredAlerts(triggeredData.alerts || []);
         }
       } catch (err) {
-        console.error("Failed to load user data:", err);
+        devError("Failed to load user data:", err);
       }
     };
 
@@ -153,7 +154,7 @@ export default function MainPage() {
 
     if (alertConfigs.length > 0 && findings.length > 0) {
       try {
-        fetch("http://localhost:8000/api/alerts/evaluate", {
+        fetch(api.endpoints.alertsEvaluate, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -161,10 +162,10 @@ export default function MainPage() {
             alertConfigs: alertConfigs,
           }),
         }).catch((err) =>
-          console.log("Backend alert evaluation optional:", err),
+          devLog("Backend alert evaluation optional:", err),
         );
       } catch (err) {
-        console.log("Backend connection not available");
+        devLog("Backend connection not available");
       }
     }
   }, [findings, alertConfigs, dismissed]);
@@ -214,7 +215,7 @@ export default function MainPage() {
       setError(null);
       setApproved((prev) => new Set(prev).add(id));
 
-      const response = await fetch("http://localhost:8000/api/execute", {
+      const response = await fetch(api.endpoints.execute, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -244,7 +245,7 @@ export default function MainPage() {
 
         // Save to database
         try {
-          fetch("http://localhost:8000/api/action-logs", {
+          fetch(api.endpoints.actionLogs, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify({
@@ -253,9 +254,9 @@ export default function MainPage() {
               action: "Approved",
               resource_type: targetFinding.type,
             }),
-          }).catch((err) => console.log("Backend sync optional:", err));
+          }).catch((err) => devLog("Backend sync optional:", err));
         } catch (err) {
-          console.log("Backend connection not available");
+          devLog("Backend connection not available");
         }
 
         setTimeout(() => {
@@ -310,7 +311,7 @@ export default function MainPage() {
     }
 
     try {
-      const response = await fetch("http://localhost:8000/api/analyze", {
+      const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -367,16 +368,16 @@ export default function MainPage() {
     setAlertConfigs((prev) => [...prev, alert]);
 
     try {
-      fetch("http://localhost:8000/api/alerts/config", {
+      fetch(api.endpoints.alertsConfig, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           ...newAlert,
           user_id: user.email,
         }),
-      }).catch((err) => console.log("Backend sync optional:", err));
+      }).catch((err) => devLog("Backend sync optional:", err));
     } catch (err) {
-      console.log("Backend connection not available");
+      devLog("Backend connection not available");
     }
 
     setNewAlert({
@@ -393,11 +394,11 @@ export default function MainPage() {
     setAlertConfigs((prev) => prev.filter((a) => a.id !== alertId));
 
     try {
-      fetch(`http://localhost:8000/api/alerts/config/${alertId}`, {
+      fetch(`${api.endpoints.alertsConfig}/${alertId}`, {
         method: "DELETE",
-      }).catch((err) => console.log("Backend sync optional:", err));
+      }).catch((err) => devLog("Backend sync optional:", err));
     } catch (err) {
-      console.log("Backend connection not available");
+      devLog("Backend connection not available");
     }
   };
 
@@ -421,7 +422,7 @@ export default function MainPage() {
 
     // Save to database
     try {
-      fetch("http://localhost:8000/api/action-logs", {
+      fetch(api.endpoints.actionLogs, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -430,9 +431,9 @@ export default function MainPage() {
           action: "Dismissed",
           resource_type: finding.type,
         }),
-      }).catch((err) => console.log("Backend sync optional:", err));
+      }).catch((err) => devLog("Backend sync optional:", err));
     } catch (err) {
-      console.log("Backend connection not available");
+      devLog("Backend connection not available");
     }
   };
 
