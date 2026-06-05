@@ -67,14 +67,18 @@ export default function MainPage() {
 
       try {
         // Fetch alerts
-        const alertsRes = await fetch(`${api.endpoints.alertsConfig}?user_id=${user.email}`);
+        const alertsRes = await fetch(
+          `${api.endpoints.alertsConfig}?user_id=${user.email}`,
+        );
         if (alertsRes.ok) {
           const alertsData = await alertsRes.json();
           setAlertConfigs(alertsData.configs || []);
         }
 
         // Fetch action history
-        const logsRes = await fetch(`${api.endpoints.actionLogs}?user_id=${user.email}`);
+        const logsRes = await fetch(
+          `${api.endpoints.actionLogs}?user_id=${user.email}`,
+        );
         if (logsRes.ok) {
           const logsData = await logsRes.json();
           const formattedLogs = logsData.logs.map((log: any) => ({
@@ -88,7 +92,9 @@ export default function MainPage() {
         }
 
         // Fetch triggered alerts
-        const triggeredRes = await fetch(`${api.endpoints.alertsTriggered}?user_id=${user.email}`);
+        const triggeredRes = await fetch(
+          `${api.endpoints.alertsTriggered}?user_id=${user.email}`,
+        );
         if (triggeredRes.ok) {
           const triggeredData = await triggeredRes.json();
           setTriggeredAlerts(triggeredData.alerts || []);
@@ -161,9 +167,7 @@ export default function MainPage() {
             findings: findings,
             alertConfigs: alertConfigs,
           }),
-        }).catch((err) =>
-          devLog("Backend alert evaluation optional:", err),
-        );
+        }).catch((err) => devLog("Backend alert evaluation optional:", err));
       } catch (err) {
         devLog("Backend connection not available");
       }
@@ -207,6 +211,10 @@ export default function MainPage() {
       actionType = "secure_s3";
     } else if (targetFinding.type.includes("Scaling")) {
       actionType = "scale_instance";
+    } else if (targetFinding.type.includes("RDS")) {
+      actionType = "stop_rds";
+    } else if (targetFinding.type.includes("VPC")) {
+      actionType = "delete_vpc";
     }
 
     try {

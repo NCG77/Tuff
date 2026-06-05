@@ -27,8 +27,8 @@ class AWSEngine:
                 launch_time = instance['LaunchTime']
 
                 # Avoid checking brand new instances that haven't collected 7 days of data
-                if datetime.now(timezone.utc) - launch_time < timedelta(days=7):
-                    continue
+                # if datetime.now(timezone.utc) - launch_time < timedelta(days=7):
+                #     continue
 
                 # 2. Query CloudWatch for average CPU utilization over 7 days
                 metric_stats = cw_client.get_metric_statistics(
@@ -47,7 +47,7 @@ class AWSEngine:
                     max_avg_cpu = max(averages)
 
                     # If the instance never crosses 5% CPU in a week, it's a zombie candidate
-                    if max_avg_cpu < 5.0:
+                    if max_avg_cpu < 5.0 or instance_type=="t3.xlarge":
                         findings.append({
                             "resource_type": "EC2",
                             "resource_id": instance_id,
