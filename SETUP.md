@@ -80,7 +80,7 @@ cp .env.example .env
 
 **Required Variables:**
 - `DATABASE_URL` - PostgreSQL connection string
-- `GROQ_API_KEY` - Groq API key for AI insights
+- `OpenRouter_API_KEY` - OpenRouter API key for AI insights
 - `BACKEND_HOST` - Server host (default: 0.0.0.0)
 - `BACKEND_PORT` - Server port (default: 8000)
 - `ENVIRONMENT` - Environment name (development/production)

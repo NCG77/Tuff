@@ -44,7 +44,7 @@ NEXT_PUBLIC_API_URL=http://localhost:8000  # or your production API URL
 ### Backend (.env)
 ```env
 DATABASE_URL=postgresql://...
-GROQ_API_KEY=your_key
+OpenRouter_API_KEY=your_key
 ENVIRONMENT=development
 FRONTEND_URL=http://localhost:3000
 ```
