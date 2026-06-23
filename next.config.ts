@@ -74,7 +74,9 @@ const nextConfig: NextConfig = {
     optimizePackageImports: ["lucide-react"]
   },
 
-  webpack: (config, { isServer }) => {
+  turbopack: {},
+
+  /* webpack: (config, { isServer }) => {
     if (!isServer) {
       config.optimization = {
         ...config.optimization,
@@ -94,7 +96,7 @@ const nextConfig: NextConfig = {
       };
     }
     return config;
-  },
+  }, */
 };
 
 export default nextConfig;
