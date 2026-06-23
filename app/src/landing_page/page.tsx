@@ -447,14 +447,13 @@ export default function LandingPage() {
           </p>
           <div className="cta-btns">
             <Link href="/src/signup_page" className="btn-filled">Deploy Tuff →</Link>
-            <a href="https://docs.example.com" target="_blank" rel="noopener noreferrer" className="btn-outline">Read the Docs</a>
           </div>
         </section>
 
         <footer>
           <span className="f-logo">tuff</span>
-          <span className="f-stack">Python · FastAPI · Next.js · ChromaDB · Boto3</span>
-          <span className="f-copy">© 2025 Tuff FinOps</span>
+          <span className="f-stack">Made with ❤️ in India</span>
+          <span className="f-copy">© 2026 Tuff FinOps</span>
         </footer>
       </div>
     </>

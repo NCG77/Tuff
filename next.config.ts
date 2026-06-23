@@ -1,23 +1,28 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* Production readiness configurations */
+  /* Production readiness configurations for slow free servers (Vercel/Render) */
   
   // Enable strict mode for development
   reactStrictMode: true,
 
-  // Optimize images
+  // Aggressive image optimization for slow servers
   images: {
-    formats: ["image/avif", "image/webp"],
+    formats: ["image/webp"],
     remotePatterns: [
       {
         protocol: "https",
         hostname: "**.firebasestorage.app",
       },
     ],
+    deviceSizes: [640, 750, 828, 1080, 1200],
+    imageSizes: [16, 32, 48, 64, 96],
+    minimumCacheTTL: 60 * 60 * 24 * 365, // 1 year cache
+    dangerouslyAllowSVG: true,
+    contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
   },
 
-  // Security headers
+  // HTTP caching headers for optimal free tier usage
   headers: async () => [
     {
       source: "/:path*",
@@ -38,6 +43,28 @@ const nextConfig: NextConfig = {
           key: "Referrer-Policy",
           value: "strict-origin-when-cross-origin",
         },
+        {
+          key: "Cache-Control",
+          value: "public, max-age=31536000, immutable",
+        },
+      ],
+    },
+    {
+      source: "/api/:path*",
+      headers: [
+        {
+          key: "Cache-Control",
+          value: "public, max-age=60, s-maxage=300",
+        },
+      ],
+    },
+    {
+      source: "/_next/static/:path*",
+      headers: [
+        {
+          key: "Cache-Control",
+          value: "public, max-age=31536000, immutable",
+        },
       ],
     },
   ],
@@ -47,9 +74,41 @@ const nextConfig: NextConfig = {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
   },
 
-  // Optimize performance
+  // Performance optimizations for free tier
   compress: true,
   poweredByHeader: false,
+  
+  // Experimental performance features
+  experimental: {
+    optimizePackageImports: ["lucide-react"],
+    turbopack: true,
+  },
+
+  // Reduce bundle size
+  webpack: (config, { isServer }) => {
+    if (!isServer) {
+      config.optimization = {
+        ...config.optimization,
+        splitChunks: {
+          chunks: "all",
+          cacheGroups: {
+            default: false,
+            vendors: false,
+            vendor: {
+              name: "vendor",
+              chunks: "all",
+              test: /node_modules/,
+              priority: 20,
+            },
+          },
+        },
+      };
+    }
+    return config;
+  },
+
+  // Streaming for better performance on slow servers
+  swcMinify: true,
 };
 
 export default nextConfig;

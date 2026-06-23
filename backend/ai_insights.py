@@ -1,14 +1,54 @@
-from groq import Groq
 import json
 import os
+import base64
+import openai
+from openai import OpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+client = OpenAI(
+    base_url="https://openrouter.ai/api/v1",
+    api_key=os.getenv("OPENROUTER_API_KEY")
+)
 
-def explain_finding(finding: dict) -> dict:
-    # UPDATED PROMPT: Enforcing strict numeric value formatting for the savings key
+class TokenLimiter:
+    """Automated backend safeguard to prevent quota overrun during batch processing."""
+    def __init__(self, max_session_tokens=50000):
+        self.max_session_tokens = max_session_tokens
+        self.tokens_consumed = 0
+
+    def verify_allowance(self):
+        if self.tokens_consumed >= self.max_session_tokens:
+            raise RuntimeError("ERROR_SESSION_LIMIT_EXCEEDED: The local batch process exceeded maximum allocated tokens.")
+
+    def log_usage(self, usage_data):
+        if usage_data:
+            self.tokens_consumed += usage_data.total_tokens
+
+session_tracker = TokenLimiter(max_session_tokens=50000)
+
+def encode_image_to_base64(image_path: str) -> str:
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
+
+def build_dynamic_payload(text_prompt: str, image_path: str = None) -> list:
+    content = [{"type": "text", "text": text_prompt}]
+    if image_path and os.path.exists(image_path):
+        base64_img = encode_image_to_base64(image_path)
+        content.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{base64_img}"}
+        })
+    return content
+
+def explain_finding(finding: dict, image_path: str = None) -> dict:
+    """
+    Headless processing pipeline unit. 
+    Ingests cloud asset state and outputs strict, machine-readable JSON optimization data.
+    """
+    session_tracker.verify_allowance()
+
     prompt = f"""Analyze this cloud infrastructure finding and respond exactly within this JSON schema structure:
     {{
         "explanation": "Simple 1-2 sentence explanation detailing what the asset is.",
@@ -19,75 +59,40 @@ def explain_finding(finding: dict) -> dict:
     }}
 
     CRITICAL RULES:
-    1. The 'estimated_savings' value MUST ONLY contain a raw number string (e.g., "0.08" or "80" or "120"). 
-    2. NEVER return conversational text or explanations like "The cost of a 1GB gp3 volume..." inside the 'estimated_savings' field.
+    1. The 'estimated_savings' value MUST ONLY contain a raw number string.
+    2. NEVER return conversational text inside the 'estimated_savings' field.
 
     Cloud Asset Finding Payload:
     {json.dumps(finding, indent=2)}
     """
 
     try:
-        # Utilizing Groq's native JSON Mode response schema formatting configuration
         response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="openrouter/free",
             messages=[
                 {
                     "role": "system",
-                    "content": "You are a cloud infrastructure analyst. You must respond exclusively with valid JSON."
+                    "content": "You are an automated cloud data parser. Respond exclusively with valid JSON."
                 },
                 {
                     "role": "user",
-                    "content": prompt
+                    "content": build_dynamic_payload(prompt, image_path)
                 }
             ],
-            response_format={"type": "json_object"}, # Forces the LLM to output pristine parseable JSON
-            temperature=0.1 # Lowered temperature for deterministic keyword output adherence
+            response_format={"type": "json_object"}, 
+            temperature=0.1
         )
         
-        response_text = response.choices[0].message.content
-        return json.loads(response_text)
+        session_tracker.log_usage(response.usage)
+        return json.loads(response.choices[0].message.content)
 
-    except Exception as e:
-        print(f"Error executing Groq payload extraction: {str(e)}")
-        return {
-            "explanation": "Manual review recommended for target infrastructure footprint asset.",
-            "business_impact": "Accumulating continuous passive burn on active subscription tiers.",
-            "recommended_action": "Investigate source instantiation lifecycle parameters.",
-            "priority": "medium",
-            "estimated_savings": "0.08" # Defensive absolute fallback baseline string representation
-        }
-
-
-# Keep the analyze function at the bottom for local sandbox script unit test execution
-def analyze_infrastructure(engine_data):
-    prompt = f"""
-        You are a cloud FinOps AI assistant.
-        Analyze this cloud infrastructure finding and generate:
-        1. Simple explanation
-        2. Business impact
-        3. Recommended action
+    except openai.RateLimitError as e:
+        raise RuntimeError(f"ERROR_QUOTA_EXCEEDED: Account token limit breached. ({str(e)})")
         
-        Data:
-        {json.dumps(engine_data, indent=2)}
-    """
-    response = client.chat.completions.create(
-        model="llama-3.3-70b-versatile",
-        messages=[
-            {"role": "system", "content": "You are an expert AWS FinOps and cloud security analyst."},
-            {"role": "user", "content": prompt}
-        ],
-        temperature=0.3
-    )
-    return response.choices[0].message.content
-
-if __name__ == "__main__":
-    engine_data = {
-        "resource_type": "EC2",
-        "resource_id": "i-123",
-        "issue": "Idle Instance",
-        "severity": "medium",
-        "metrics": {"cpu_avg": 2, "network_activity": 0},
-        "estimated_monthly_cost": 120,
-        "recommendation": "Consider stopping or downsizing"
-    }
-    print(explain_finding(engine_data))
+    except openai.APIStatusError as e:
+        if e.status_code == 402:
+            raise RuntimeError(f"ERROR_INSUFFICIENT_FUNDS: OpenRouter account lacks credits. ({str(e)})")
+        raise RuntimeError(f"ERROR_UPSTREAM_API: AI Provider error occurred. ({str(e)})")
+        
+    except Exception as e:
+        raise RuntimeError(f"ERROR_INTERNAL_PARSING: Failed to process infrastructure payload. ({str(e)})")

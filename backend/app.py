@@ -13,7 +13,6 @@ import uuid
 from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog
 from sqlalchemy.orm import Session
 
-# Load environment variables
 load_dotenv()
 
 def format_datetime(dt: datetime) -> str:
@@ -29,11 +28,9 @@ app = FastAPI(
     version="1.0.0"
 )
 
-# CORS configuration from environment
 frontend_url = os.getenv("FRONTEND_URL", "http://localhost:3000")
 environment = os.getenv("ENVIRONMENT", "development")
 
-# More restrictive CORS in production
 cors_origins = [frontend_url] if environment == "production" else ["*"]
 
 app.add_middleware(
@@ -125,24 +122,15 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         elif request.action_type == "scale_instance":
             ec2 = session.client('ec2')
             instance_id = str(request.resource_id)
-            
-            # 1. Stop the instance safely
             print(f"Stopping instance {instance_id} for rightsizing...")
             ec2.stop_instances(InstanceIds=[instance_id])
-            
-            # Wait until the instance is completely stopped before changing the type
             waiter = ec2.get_waiter('instance_stopped')
             waiter.wait(InstanceIds=[instance_id])
-            
-            # 2. Modify the instance type attribute (e.g., changing to t3.micro)
-            # You can pass the target type dynamically from your request payload
             target_type = getattr(request, 'target_type', 't3.micro')
             ec2.modify_instance_attribute(
                 InstanceId=instance_id, 
                 InstanceType={'Value': target_type}
             )
-            
-            # 3. Fire the instance back up
             ec2.start_instances(InstanceIds=[instance_id])
             msg = f"Successfully scaled instance {instance_id} down to {target_type} dynamically."
         
@@ -186,17 +174,17 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
 
 @app.post("/api/analyze")
 async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get_db)):
+    scan_id = str(uuid.uuid4())
+    
     try:
-        scan_id = str(uuid.uuid4())
-        logger.info(f"🚀 Initializing cloud audit for region: {request.region} (Scan ID: {scan_id})")
+        logger.info(f"Initializing cloud audit for region: {request.region} (Scan ID: {scan_id})")
         aws_engine = AWSEngine(
             aws_access_key=request.aws_access_key,
             aws_secret_key=request.aws_secret_key,
             region_name=request.region
         )
         raw_findings = aws_engine.execute_full_scan()
-        
-        logger.info(f"📊 Pipeline data ready. Processing {len(raw_findings)} items via Groq Mixtral...")
+        logger.info(f"Pipeline data ready. Processing {len(raw_findings)} items via AI analysis...")
 
         ai_evaluated_queue = []
         minimal_findings = [] 
@@ -209,7 +197,7 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
                 "type": f"{finding['issue']} ({finding['resource_type']})",
                 "inst": finding["metrics"].get("instance_type", finding["resource_type"]),
                 "cpu": f"{finding['metrics'].get('cpu_avg', '0')}%",
-                "region": finding["region"],
+                "region": finding.get("region", request.region), 
                 "cur": f"${finding.get('estimated_monthly_cost', '120')}/mo",
                 "save": f"${ai_analysis.get('estimated_savings', 'TBD')}/mo",
                 "explanation": ai_analysis.get("explanation", "Manual review recommended."),
@@ -246,8 +234,34 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
             "findings_count": len(minimal_findings)
         })
 
+    except RuntimeError as e:
+        error_message = str(e)
+        logger.error(f"❌ AI Quota/Execution Error: {error_message}")
+        try:
+            infra_log = InfrastructureLog(
+                scan_id=scan_id,
+                region=request.region,
+                findings=[],
+                findings_count=0,
+                status="failed",
+                error_message=error_message
+            )
+            db.add(infra_log)
+            db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to save error state to DB: {str(db_err)}")
+        
+        # Route the specific error string to standard HTTP status codes for the frontend
+        if "ERROR_QUOTA_EXCEEDED" in error_message or "ERROR_SESSION_LIMIT_EXCEEDED" in error_message:
+            raise HTTPException(status_code=429, detail="AI_TOKEN_LIMIT_REACHED")
+        elif "ERROR_INSUFFICIENT_FUNDS" in error_message:
+            raise HTTPException(status_code=402, detail="AI_BILLING_LIMIT_REACHED")
+        else:
+            raise HTTPException(status_code=502, detail="AI_PROVIDER_ERROR")
+
     except Exception as e:
         logger.error(f"❌ Core infrastructure analysis loop failed: {str(e)}")
+        
         try:
             infra_log = InfrastructureLog(
                 scan_id=scan_id,
@@ -259,8 +273,9 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
             )
             db.add(infra_log)
             db.commit()
-        except:
-            pass
+        except Exception as db_err:
+            logger.error(f"Failed to save generic error state to DB: {str(db_err)}")
+            
         raise HTTPException(status_code=500, detail=f"Infrastructure scan failed: {str(e)}")
 
 @app.get("/api/logs/infrastructure")
@@ -364,7 +379,7 @@ async def generate_iam_policy():
         
         Respond ONLY with valid JSON in this exact format:
         {
-            "Version": "2012-10-17",
+            "Version": "curent-date",
             "Statement": [
                 {
                     "Sid": "EC2Operations",

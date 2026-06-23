@@ -60,13 +60,11 @@ export default function MainPage() {
     if (!loading && !user) router.push("/src/login_page");
   }, [user, loading, router]);
 
-  // Load user data from database on mount
   useEffect(() => {
     const loadUserData = async () => {
       if (!user?.email) return;
 
       try {
-        // Fetch alerts
         const alertsRes = await fetch(
           `${api.endpoints.alertsConfig}?user_id=${user.email}`,
         );
@@ -75,7 +73,6 @@ export default function MainPage() {
           setAlertConfigs(alertsData.configs || []);
         }
 
-        // Fetch action history
         const logsRes = await fetch(
           `${api.endpoints.actionLogs}?user_id=${user.email}`,
         );
@@ -91,7 +88,6 @@ export default function MainPage() {
           setActionHistory(formattedLogs);
         }
 
-        // Fetch triggered alerts
         const triggeredRes = await fetch(
           `${api.endpoints.alertsTriggered}?user_id=${user.email}`,
         );
@@ -251,7 +247,6 @@ export default function MainPage() {
 
         setActionHistory((prev) => [...prev, logEntry]);
 
-        // Save to database
         try {
           fetch(api.endpoints.actionLogs, {
             method: "POST",
@@ -296,7 +291,6 @@ export default function MainPage() {
     setScanningResource(resourceType);
     setError(null);
 
-    // 1. Initialize credential and region targets as blank/dynamic states
     let keyId = activeCredentials?.keyId;
     let secretKey = activeCredentials?.secretKey;
     let targetRegion = "";
@@ -428,7 +422,6 @@ export default function MainPage() {
     setDismissed((prev) => new Set(prev).add(id));
     if (selectedFinding?.id === id) setSelectedFinding(null);
 
-    // Save to database
     try {
       fetch(api.endpoints.actionLogs, {
         method: "POST",
