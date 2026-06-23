@@ -1,12 +1,8 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* Production readiness configurations for slow free servers (Vercel/Render) */
-  
-  // Enable strict mode for development
   reactStrictMode: true,
 
-  // Aggressive image optimization for slow servers
   images: {
     formats: ["image/webp"],
     remotePatterns: [
@@ -17,12 +13,11 @@ const nextConfig: NextConfig = {
     ],
     deviceSizes: [640, 750, 828, 1080, 1200],
     imageSizes: [16, 32, 48, 64, 96],
-    minimumCacheTTL: 60 * 60 * 24 * 365, // 1 year cache
+    minimumCacheTTL: 60 * 60 * 24 * 365, 
     dangerouslyAllowSVG: true,
     contentSecurityPolicy: "default-src 'self'; script-src 'none'; sandbox;",
   },
 
-  // HTTP caching headers for optimal free tier usage
   headers: async () => [
     {
       source: "/:path*",
@@ -69,22 +64,16 @@ const nextConfig: NextConfig = {
     },
   ],
 
-  // Environment variables validation
   env: {
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
   },
-
-  // Performance optimizations for free tier
   compress: true,
   poweredByHeader: false,
   
-  // Experimental performance features
   experimental: {
-    optimizePackageImports: ["lucide-react"],
-    turbopack: true,
+    optimizePackageImports: ["lucide-react"]
   },
 
-  // Reduce bundle size
   webpack: (config, { isServer }) => {
     if (!isServer) {
       config.optimization = {
@@ -106,9 +95,6 @@ const nextConfig: NextConfig = {
     }
     return config;
   },
-
-  // Streaming for better performance on slow servers
-  swcMinify: true,
 };
 
 export default nextConfig;
