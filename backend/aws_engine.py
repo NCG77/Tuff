@@ -15,7 +15,6 @@ class AWSEngine:
         cw_client = self.session.client('cloudwatch')
         findings = []
 
-        # 1. Fetch all running EC2 instances
         response = ec2_client.describe_instances(
             Filters=[{'Name': 'instance-state-name', 'Values': ['running']}]
         )
@@ -26,18 +25,13 @@ class AWSEngine:
                 instance_type = instance['InstanceType']
                 launch_time = instance['LaunchTime']
 
-                # Avoid checking brand new instances that haven't collected 7 days of data
-                # if datetime.now(timezone.utc) - launch_time < timedelta(days=7):
-                #     continue
-
-                # 2. Query CloudWatch for average CPU utilization over 7 days
                 metric_stats = cw_client.get_metric_statistics(
                     Namespace='AWS/EC2',
                     MetricName='CPUUtilization',
                     Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
                     StartTime=datetime.now(timezone.utc) - timedelta(days=7),
                     EndTime=datetime.now(timezone.utc),
-                    Period=86400,  # 1-day chunks
+                    Period=86400, 
                     Statistics=['Average']
                 )
 
@@ -46,7 +40,6 @@ class AWSEngine:
                     averages = [d['Average'] for d in datapoints]
                     max_avg_cpu = max(averages)
 
-                    # If the instance never crosses 5% CPU in a week, it's a zombie candidate
                     if max_avg_cpu < 5.0 or instance_type=="t3.xlarge":
                         findings.append({
                             "resource_type": "EC2",
@@ -59,7 +52,7 @@ class AWSEngine:
                                 "instance_type": instance_type
                             },
                             "region": self.region,
-                            "estimated_monthly_cost": 120, # Fixed standard metric format hook
+                            "estimated_monthly_cost": 120, 
                             "recommendation": "Consider stopping or downsizing this instance to save costs."
                         })
         return findings
@@ -68,7 +61,6 @@ class AWSEngine:
         ec2_client = self.session.client('ec2')
         findings = []
 
-        # Fetch volumes that are not attached to anything
         response = ec2_client.describe_volumes(
             Filters=[{'Name': 'status', 'Values': ['available']}]
         )
@@ -88,7 +80,7 @@ class AWSEngine:
                     "volume_type": volume_type
                 },
                 "region": self.region,
-                "estimated_monthly_cost": round(size_gb * 0.08, 2), # Auto-calculates accurate cost tier metrics
+                "estimated_monthly_cost": round(size_gb * 0.08, 2), 
                 "recommendation": "Snapshot data if needed, then delete this orphaned volume immediately."
             })
         return findings
@@ -103,11 +95,9 @@ class AWSEngine:
                 bucket_name = bucket['Name']
                 
                 try:
-                    # Check the Public Access Block Configuration
                     pab = s3_client.get_public_access_block(Bucket=bucket_name)
                     config = pab.get('PublicAccessBlockConfiguration', {})
                     
-                    # If any of the protective blocks are set to False, flag it
                     is_exposed = not all([
                         config.get('BlockPublicAcls', False),
                         config.get('IgnorePublicAcls', False),
@@ -115,7 +105,6 @@ class AWSEngine:
                         config.get('RestrictPublicBuckets', False)
                     ])
                 except s3_client.exceptions.ClientError as e:
-                    # If public blocking is entirely off, flag as exposed
                     if e.response['Error']['Code'] == 'NoSuchPublicAccessBlockConfiguration':
                         is_exposed = True
                     else:
@@ -146,7 +135,6 @@ class AWSEngine:
         
         for v in vpcs:
             vpc_id = v['VpcId']
-            # Find running nodes within subnet containers
             instances = ec2_client.describe_instances(
                 Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
             )['Reservations']
@@ -163,12 +151,11 @@ class AWSEngine:
                     },
                     "region": self.region,
                     "recommendation": "Consider deleting this VPC to reduce management overhead and potential attack surface.",
-                    "estimated_monthly_cost": 5 # Fixed missing array separation comma bug
+                    "estimated_monthly_cost": 5 
                 })
         return vpc_findings
 
     def scan_rds(self) -> list:
-        # FIXED: Corrected indentation alignment blocks completely
         rds_client = self.session.client('rds')
         databases = rds_client.describe_db_instances()['DBInstances']
         rds_findings = []
@@ -187,7 +174,7 @@ class AWSEngine:
                         "engine": db['Engine'],
                         "instance_class": db['DBInstanceClass']
                     },
-                    "region": self.region, # FIXED: Changed from self.region_name to self.region
+                    "region": self.region, 
                     "recommendation": "Snapshot and terminate this unutilized database workspace ledger tier.",
                     "estimated_monthly_cost": 45 
                 })
@@ -207,7 +194,6 @@ class AWSEngine:
                 instance_id = instance['InstanceId']
                 current_type = instance['InstanceType']
 
-                # Grab a week of average cpu data
                 metric_stats = cw_client.get_metric_statistics(
                     Namespace='AWS/EC2',
                     MetricName='CPUUtilization',
@@ -221,8 +207,6 @@ class AWSEngine:
                 if datapoints:
                     averages = [d['Average'] for d in datapoints]
                     avg_cpu = sum(averages) / len(averages)
-
-                    # If average CPU is under 10%, it may be a scaling candidate
                     if avg_cpu < 10.0 and not current_type.startswith('nano' or 'micro'):
                         findings.append({
                             "resource_type": "EC2",
@@ -234,7 +218,7 @@ class AWSEngine:
                                 "current_instance_type": current_type
                             },
                             "region": self.region,
-                            "estimated_monthly_cost": 120, # Fixed standard metric format hook
+                            "estimated_monthly_cost": 120, 
                             "recommendation": f"Consider resizing this instance to a smaller type to optimize costs."
                         })
         return findings

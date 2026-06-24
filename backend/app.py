@@ -5,12 +5,12 @@ import logging
 import uvicorn
 import os
 from dotenv import load_dotenv
-from ai_insights import explain_finding
+from ai_insights import explain_finding, session_tracker
 from aws_engine import AWSEngine
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
-from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog
+from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog, UserSubscription
 from sqlalchemy.orm import Session
 
 load_dotenv()
@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="TUFF Backend API",
-    description="Cloud Infrastructure Analysis Engine",
+    description="Cloud Infrastructure Analysis Engine with Tiered AI Processing",
     version="1.0.0"
 )
 
@@ -44,12 +44,16 @@ app.add_middleware(
 @app.on_event("startup")
 async def startup_event():
     init_db()
-    logger.info("✅ Database initialized successfully")
+    logger.info("✅ Supabase Database initialized successfully")
+
+class UserSyncRequest(BaseModel):
+    firebase_uid: str
 
 class ScanRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
     region: str = "us-east-1"  
+    user_id: str 
 
 class ExecuteRequest(BaseModel):
     aws_access_key: str
@@ -71,12 +75,152 @@ class AlertRequest(BaseModel):
     alertConfigs: list
     user_id: str
 
+@app.post("/api/user/sync")
+async def sync_user_tier(request: UserSyncRequest, db: Session = Depends(get_db)):
+    """
+    Called by the frontend immediately after a successful Firebase login.
+    Checks if the user exists in Supabase. If not, provisions a free-tier profile.
+    """
+    try:
+        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == request.firebase_uid).first()
+        
+        if not user_record:
+            user_record = UserSubscription(
+                user_id=request.firebase_uid, 
+                subscription_tier="free"
+            )
+            db.add(user_record)
+            db.commit()
+            db.refresh(user_record)
+            logger.info(f"✅ Provisioned new user profile in Supabase: {request.firebase_uid}")
+            
+        return JSONResponse(content={
+            "status": "synchronized", 
+            "tier": user_record.subscription_tier,
+            "user_id": user_record.user_id
+        })
+        
+    except Exception as e:
+        logger.error(f"❌ Failed to synchronize user profile: {str(e)}")
+        raise HTTPException(status_code=500, detail="Database synchronization failure.")
+
+
+@app.post("/api/analyze")
+async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get_db)):
+    scan_id = str(uuid.uuid4())
+    
+    try:
+        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == request.user_id).first()
+        user_tier = user_record.subscription_tier.lower().strip() if user_record else "free"
+        session_tracker.configure_session_tier(user_tier)
+        
+        logger.info(f"Initializing cloud audit for region: {request.region} (Scan ID: {scan_id}) [Verified Tier: {user_tier.upper()}]")
+        
+        aws_engine = AWSEngine(
+            aws_access_key=request.aws_access_key,
+            aws_secret_key=request.aws_secret_key,
+            region_name=request.region
+        )
+        raw_findings = aws_engine.execute_full_scan()
+        logger.info(f"Pipeline data ready. Processing {len(raw_findings)} items via AI analysis under '{user_tier}' quota...")
+
+        ai_evaluated_queue = []
+        minimal_findings = [] 
+
+        for finding in raw_findings:
+            ai_analysis = explain_finding(finding)
+            
+            completed_payload = {
+                "id": finding["resource_id"],
+                "type": f"{finding['issue']} ({finding['resource_type']})",
+                "inst": finding["metrics"].get("instance_type", finding["resource_type"]),
+                "cpu": f"{finding['metrics'].get('cpu_avg', '0')}%",
+                "region": finding.get("region", request.region), 
+                "cur": f"${finding.get('estimated_monthly_cost', '120')}/mo",
+                "save": f"${ai_analysis.get('estimated_savings', 'TBD')}/mo",
+                "explanation": ai_analysis.get("explanation", "Manual review recommended."),
+                "business_impact": ai_analysis.get("business_impact", "Unknown risk profile."),
+                "recommended_action": ai_analysis.get("recommended_action", "Investigate resource configuration."),
+                "priority": ai_analysis.get("priority", "medium")
+            }
+            ai_evaluated_queue.append(completed_payload)
+            minimal_findings.append({
+                "id": finding["resource_id"],
+                "res_type": finding["resource_type"],
+                "issue": finding["issue"],
+                "severity": finding["severity"],
+                "cost": finding.get("estimated_monthly_cost", 0),
+                "save": ai_analysis.get("estimated_savings", 0)
+            })
+
+        infra_log = InfrastructureLog(
+            scan_id=scan_id,
+            region=request.region,
+            findings=minimal_findings,
+            findings_count=len(minimal_findings),
+            status="completed"
+        )
+        db.add(infra_log)
+        db.commit()
+        
+        logger.info(f"✅ Infrastructure scan logged to database (Scan ID: {scan_id})")
+        return JSONResponse(content={
+            "status": "success",
+            "data": ai_evaluated_queue,
+            "scan_id": scan_id,
+            "timestamp": format_datetime(datetime.utcnow()),
+            "findings_count": len(minimal_findings),
+            "tier_applied": user_tier
+        })
+
+    except RuntimeError as e:
+        error_message = str(e)
+        logger.error(f"❌ AI Quota/Execution Error: {error_message}")
+        try:
+            infra_log = InfrastructureLog(
+                scan_id=scan_id,
+                region=request.region,
+                findings=[],
+                findings_count=0,
+                status="failed",
+                error_message=error_message
+            )
+            db.add(infra_log)
+            db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to save error state to DB: {str(db_err)}")
+    
+        if "ERROR_SESSION_LIMIT_EXCEEDED" in error_message:
+            raise HTTPException(status_code=429, detail="TIER_TOKEN_LIMIT_EXCEEDED")
+        elif "ERROR_QUOTA_EXCEEDED" in error_message:
+            raise HTTPException(status_code=429, detail="AI_TOKEN_LIMIT_REACHED")
+        elif "ERROR_INSUFFICIENT_FUNDS" in error_message:
+            raise HTTPException(status_code=402, detail="AI_BILLING_LIMIT_REACHED")
+        else:
+            raise HTTPException(status_code=502, detail="AI_PROVIDER_ERROR")
+
+    except Exception as e:
+        logger.error(f"❌ Core infrastructure analysis loop failed: {str(e)}")
+        
+        try:
+            infra_log = InfrastructureLog(
+                scan_id=scan_id,
+                region=request.region,
+                findings=[],
+                findings_count=0,
+                status="failed",
+                error_message=str(e)
+            )
+            db.add(infra_log)
+            db.commit()
+        except Exception as db_err:
+            logger.error(f"Failed to save generic error state to DB: {str(db_err)}")
+            
+        raise HTTPException(status_code=500, detail=f"Infrastructure scan failed: {str(e)}")
+
+
 @app.post("/api/execute")
 async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get_db)):
-    """
-    Receives an approval command from the frontend and uses boto3 
-    to physically modify or remediate the target cloud resource.
-    """
     try:
         logger.info(f"⚡ Received execution command: {request.action_type} for resource {request.resource_id}")
         aws_engine = AWSEngine(
@@ -119,6 +263,7 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
                 }
             )
             msg = f"Successfully enabled Public Access Block on vulnerable S3 bucket {request.resource_id}."
+            
         elif request.action_type == "scale_instance":
             ec2 = session.client('ec2')
             instance_id = str(request.resource_id)
@@ -172,112 +317,6 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         raise HTTPException(status_code=500, detail=f"Remediation pipeline crashed: {str(e)}")
 
 
-@app.post("/api/analyze")
-async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get_db)):
-    scan_id = str(uuid.uuid4())
-    
-    try:
-        logger.info(f"Initializing cloud audit for region: {request.region} (Scan ID: {scan_id})")
-        aws_engine = AWSEngine(
-            aws_access_key=request.aws_access_key,
-            aws_secret_key=request.aws_secret_key,
-            region_name=request.region
-        )
-        raw_findings = aws_engine.execute_full_scan()
-        logger.info(f"Pipeline data ready. Processing {len(raw_findings)} items via AI analysis...")
-
-        ai_evaluated_queue = []
-        minimal_findings = [] 
-
-        for finding in raw_findings:
-            ai_analysis = explain_finding(finding)
-            
-            completed_payload = {
-                "id": finding["resource_id"],
-                "type": f"{finding['issue']} ({finding['resource_type']})",
-                "inst": finding["metrics"].get("instance_type", finding["resource_type"]),
-                "cpu": f"{finding['metrics'].get('cpu_avg', '0')}%",
-                "region": finding.get("region", request.region), 
-                "cur": f"${finding.get('estimated_monthly_cost', '120')}/mo",
-                "save": f"${ai_analysis.get('estimated_savings', 'TBD')}/mo",
-                "explanation": ai_analysis.get("explanation", "Manual review recommended."),
-                "business_impact": ai_analysis.get("business_impact", "Unknown risk profile."),
-                "recommended_action": ai_analysis.get("recommended_action", "Investigate resource configuration."),
-                "priority": ai_analysis.get("priority", "medium")
-            }
-            ai_evaluated_queue.append(completed_payload)
-            minimal_findings.append({
-                "id": finding["resource_id"],
-                "res_type": finding["resource_type"],
-                "issue": finding["issue"],
-                "severity": finding["severity"],
-                "cost": finding.get("estimated_monthly_cost", 0),
-                "save": ai_analysis.get("estimated_savings", 0)
-            })
-
-        infra_log = InfrastructureLog(
-            scan_id=scan_id,
-            region=request.region,
-            findings=minimal_findings,
-            findings_count=len(minimal_findings),
-            status="completed"
-        )
-        db.add(infra_log)
-        db.commit()
-        
-        logger.info(f"✅ Infrastructure scan logged to database (Scan ID: {scan_id})")
-        return JSONResponse(content={
-            "status": "success",
-            "data": ai_evaluated_queue,
-            "scan_id": scan_id,
-            "timestamp": format_datetime(datetime.utcnow()),
-            "findings_count": len(minimal_findings)
-        })
-
-    except RuntimeError as e:
-        error_message = str(e)
-        logger.error(f"❌ AI Quota/Execution Error: {error_message}")
-        try:
-            infra_log = InfrastructureLog(
-                scan_id=scan_id,
-                region=request.region,
-                findings=[],
-                findings_count=0,
-                status="failed",
-                error_message=error_message
-            )
-            db.add(infra_log)
-            db.commit()
-        except Exception as db_err:
-            logger.error(f"Failed to save error state to DB: {str(db_err)}")
-        
-        # Route the specific error string to standard HTTP status codes for the frontend
-        if "ERROR_QUOTA_EXCEEDED" in error_message or "ERROR_SESSION_LIMIT_EXCEEDED" in error_message:
-            raise HTTPException(status_code=429, detail="AI_TOKEN_LIMIT_REACHED")
-        elif "ERROR_INSUFFICIENT_FUNDS" in error_message:
-            raise HTTPException(status_code=402, detail="AI_BILLING_LIMIT_REACHED")
-        else:
-            raise HTTPException(status_code=502, detail="AI_PROVIDER_ERROR")
-
-    except Exception as e:
-        logger.error(f"❌ Core infrastructure analysis loop failed: {str(e)}")
-        
-        try:
-            infra_log = InfrastructureLog(
-                scan_id=scan_id,
-                region=request.region,
-                findings=[],
-                findings_count=0,
-                status="failed",
-                error_message=str(e)
-            )
-            db.add(infra_log)
-            db.commit()
-        except Exception as db_err:
-            logger.error(f"Failed to save generic error state to DB: {str(db_err)}")
-            
-        raise HTTPException(status_code=500, detail=f"Infrastructure scan failed: {str(e)}")
-
 @app.get("/api/logs/infrastructure")
 async def get_infrastructure_logs(limit: int = 50, db: Session = Depends(get_db)):
     try:
@@ -303,7 +342,6 @@ async def get_infrastructure_logs(limit: int = 50, db: Session = Depends(get_db)
 
 @app.get("/api/logs/infrastructure/{scan_id}")
 async def get_scan_details(scan_id: str, db: Session = Depends(get_db)):
-    
     try:
         log = db.query(InfrastructureLog).filter(InfrastructureLog.scan_id == scan_id).first()
         if not log:
@@ -350,15 +388,6 @@ async def get_execution_logs(limit: int = 50, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.get("/api/health")
-async def health_check():
-    return {
-        "status": "healthy",
-        "service": "TUFF Backend",
-        "version": "1.0.0"
-    }
-
-
 @app.post("/api/generate-iam-policy")
 async def generate_iam_policy():
     from ai_insights import client
@@ -379,7 +408,7 @@ async def generate_iam_policy():
         
         Respond ONLY with valid JSON in this exact format:
         {
-            "Version": "curent-date",
+            "Version": "2012-10-17",
             "Statement": [
                 {
                     "Sid": "EC2Operations",
@@ -458,10 +487,8 @@ async def generate_iam_policy():
             "note": "Full permissions recommended. Customize as needed based on your security requirements."
         })
 
-
 @app.post("/api/alerts/config")
 async def create_alert_config(request: AlertConfigRequest, db: Session = Depends(get_db)):
-
     try:
         config_id = str(uuid.uuid4())
         alert_config = AlertConfig(
@@ -534,17 +561,14 @@ async def delete_alert_config(config_id: str, db: Session = Depends(get_db)):
         logger.error(f"❌ Failed to delete alert config: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
-
 class ActionLogRequest(BaseModel):
     user_id: str
     resource_id: str
     action: str
     resource_type: str
 
-
 @app.post("/api/action-logs")
 async def save_action_log(request: ActionLogRequest, db: Session = Depends(get_db)):
-    """Save action logs (approve/dismiss) for user history"""
     try:
         log_id = str(uuid.uuid4())
         action_log = ActionLog(
@@ -569,7 +593,6 @@ async def save_action_log(request: ActionLogRequest, db: Session = Depends(get_d
 
 @app.get("/api/action-logs")
 async def get_action_logs(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
-    """Fetch all action logs for a specific user"""
     try:
         logs = db.query(ActionLog).filter(
             ActionLog.user_id == user_id
@@ -595,7 +618,6 @@ async def get_action_logs(user_id: str, limit: int = 100, db: Session = Depends(
 
 @app.get("/api/alerts/triggered")
 async def get_triggered_alerts(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
-    """Fetch all triggered alerts for a specific user"""
     try:
         alerts = db.query(TriggeredAlert).filter(
             TriggeredAlert.user_id == user_id
@@ -638,6 +660,7 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
                     metric_value = float(finding.get("save", "0").replace("$", "").replace("/mo", "")) if finding.get("save") else 0
                 elif config["metric"].lower() == "cur":
                     metric_value = float(finding.get("cur", "0").replace("$", "").replace("/mo", "")) if finding.get("cur") else 0
+                
                 triggered = False
                 if config["thresholdType"] == "below":
                     triggered = metric_value < config["threshold"]
@@ -675,6 +698,14 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/health")
+async def health_check():
+    return {
+        "status": "healthy",
+        "service": "TUFF Backend",
+        "version": "1.0.0"
+    }
+
 @app.get("/")
 async def root():
     return {
@@ -683,7 +714,6 @@ async def root():
         "health": "/api/health",
         "main_endpoint": "/api/analyze"
     }
-
 
 if __name__ == "__main__":
     uvicorn.run(
