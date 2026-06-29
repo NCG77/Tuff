@@ -4,6 +4,8 @@ import base64
 import openai
 from openai import OpenAI
 from dotenv import load_dotenv
+from sqlalchemy.orm import Session
+from db import UserSubscription
 
 load_dotenv()
 
@@ -11,33 +13,6 @@ client = OpenAI(
     base_url="https://openrouter.ai/api/v1",
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
-
-TIER_LIMITS = {
-    "free": 30000,     
-    "premium": 250000  
-}
-
-class DynamicTokenLimiter:
-    """Safeguard that updates thresholds on the fly based on Free vs Premium."""
-    def __init__(self):
-        self.tokens_consumed = 0
-        self.max_session_tokens = TIER_LIMITS["free"] 
-
-    def configure_session_tier(self, tier_name: str):
-        """Sets the boundary cap dynamically at the start of a scan."""
-        normalized_tier = str(tier_name).lower().strip()
-        self.max_session_tokens = TIER_LIMITS.get(normalized_tier, TIER_LIMITS["free"])
-        self.tokens_consumed = 0
-
-    def verify_allowance(self):
-        if self.tokens_consumed >= self.max_session_tokens:
-            raise RuntimeError("ERROR_SESSION_LIMIT_EXCEEDED: You have reached the token limit for your current tier.")
-
-    def log_usage(self, usage_data):
-        if usage_data:
-            self.tokens_consumed += usage_data.total_tokens
-
-session_tracker = DynamicTokenLimiter()
 
 def encode_image_to_base64(image_path: str) -> str:
     with open(image_path, "rb") as image_file:
@@ -53,12 +28,15 @@ def build_dynamic_payload(text_prompt: str, image_path: str = None) -> list:
         })
     return content
 
-def explain_finding(finding: dict, image_path: str = None) -> dict:
+def explain_finding(finding: dict, user_record: UserSubscription, db: Session, image_path: str = None) -> dict:
     """
     Headless processing pipeline unit. 
     Ingests cloud asset state and outputs strict, machine-readable JSON optimization data.
     """
-    session_tracker.verify_allowance()
+    if user_record.credits <= 0 and user_record.subscription_tier == "free":
+        raise RuntimeError("ERROR_SESSION_LIMIT_EXCEEDED: You have reached the credit limit for your free tier. Please upgrade to Pro or purchase credits.")
+    
+    model_name = "openrouter/auto"
 
     prompt = f"""Analyze this cloud infrastructure finding and respond exactly within this JSON schema structure:
     {{
@@ -79,7 +57,7 @@ def explain_finding(finding: dict, image_path: str = None) -> dict:
 
     try:
         response = client.chat.completions.create(
-            model="openrouter/free",
+            model=model_name,
             messages=[
                 {
                     "role": "system",
@@ -94,7 +72,10 @@ def explain_finding(finding: dict, image_path: str = None) -> dict:
             temperature=0.1
         )
         
-        session_tracker.log_usage(response.usage)
+        if user_record.credits > 0:
+            user_record.credits -= 100  # token usage approximation
+            db.commit()
+
         return json.loads(response.choices[0].message.content)
 
     except openai.RateLimitError as e:

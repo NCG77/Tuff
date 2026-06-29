@@ -29,8 +29,9 @@ class UserSubscription(Base):
     
     user_id = Column(String, primary_key=True, index=True)
     subscription_tier = Column(String, default="free", nullable=False)  
-    stripe_customer_id = Column(String, nullable=True)                  
-    subscription_id = Column(String, nullable=True)                     
+    razorpay_customer_id = Column(String, nullable=True)                  
+    razorpay_subscription_id = Column(String, nullable=True)
+    credits = Column(Integer, default=1000, nullable=False)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
     created_at = Column(DateTime, default=datetime.utcnow)
 
@@ -62,18 +63,19 @@ class TriggeredAlert(Base):
     condition = Column(String, nullable=False)
     timestamp = Column(DateTime, default=datetime.utcnow)
 
-
 class InfrastructureLog(Base):
     __tablename__ = "infrastructure_logs"
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     scan_id = Column(String, nullable=False, unique=True, index=True)
+    user_id = Column(String, nullable=False, index=True)
     region = Column(String, nullable=False)
     findings = Column(JSON, nullable=False)
     findings_count = Column(Integer, default=0)
     timestamp = Column(DateTime, default=datetime.utcnow)
     status = Column(String, default="completed")
     error_message = Column(String, nullable=True)
+
 
 
 class ExecutionLog(Base):

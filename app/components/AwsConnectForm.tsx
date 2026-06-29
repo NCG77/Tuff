@@ -1,16 +1,20 @@
 import { useState, useEffect } from "react";
 import { api } from "@/app/lib/config";
+import { useAuth } from "@/app/context/AuthContext";
 
 interface AwsConnectFormProps {
   onScanComplete: (
-    liveData: any[],
-    credentials?: { keyId: string; secretKey: string },
+    findings: any[],
+    credentials: { keyId: string; secretKey: string },
   ) => void;
+  onTokenLimit?: () => void;
 }
 
 export default function AwsConnectForm({
   onScanComplete,
+  ...props
 }: AwsConnectFormProps) {
+  const { user } = useAuth();
   const [accessKey, setAccessKey] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [region, setRegion] = useState("us-east-1");
@@ -49,9 +53,15 @@ export default function AwsConnectForm({
     setSuccess("");
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (user) {
+        const token = await user.getIdToken();
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           aws_access_key: accessKey,
           aws_secret_key: secretKey,
@@ -86,9 +96,15 @@ export default function AwsConnectForm({
     setError("");
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (user) {
+        const token = await user.getIdToken();
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           aws_access_key: accessKey,
           aws_secret_key: secretKey,
@@ -101,7 +117,11 @@ export default function AwsConnectForm({
       if (response.ok && result.status === "success") {
         onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
       } else {
-        setError(result.detail || "Failed to analyze cloud environment.");
+        if (response.status === 429 && props.onTokenLimit) {
+          props.onTokenLimit();
+        } else {
+          setError(result.detail || "Failed to analyze cloud environment.");
+        }
       }
     } catch (err) {
       setError("Connection to backend API failed.");
@@ -115,9 +135,15 @@ export default function AwsConnectForm({
     setError("");
 
     try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (user) {
+        const token = await user.getIdToken();
+        headers["Authorization"] = `Bearer ${token}`;
+      }
+
       const response = await fetch(api.endpoints.generateIAMPolicy, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
       });
 
       if (response.ok) {

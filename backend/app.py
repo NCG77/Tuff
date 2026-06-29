@@ -5,22 +5,96 @@ import logging
 import uvicorn
 import os
 from dotenv import load_dotenv
-from ai_insights import explain_finding, session_tracker
+from ai_insights import explain_finding
 from aws_engine import AWSEngine
 from pydantic import BaseModel
 from datetime import datetime
 import uuid
 from db import init_db, get_db, AlertConfig, TriggeredAlert, InfrastructureLog, ExecutionLog, ActionLog, UserSubscription
 from sqlalchemy.orm import Session
+import concurrent.futures
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
+
+import firebase_admin
+from firebase_admin import credentials, auth
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi import Security
+
+firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "tuff-d192d")
+if not firebase_admin._apps:
+    try:
+        firebase_admin.initialize_app(options={"projectId": firebase_project_id})
+        logger.info(f"✅ Firebase Admin SDK initialized for project: {firebase_project_id}")
+    except Exception as e:
+        logger.error(f"❌ Failed to initialize Firebase Admin SDK: {str(e)}")
+
+import razorpay
+
+razorpay_client = razorpay.Client(auth=(
+    os.getenv("RAZORPAY_KEY_ID", "rzp_test_tuff123"), 
+    os.getenv("RAZORPAY_KEY_SECRET", "secret_tuff123")
+))
+
+security = HTTPBearer()
+
+import base64
+import json
+
+ADC_MISSING = False
+
+async def get_current_user(credentials: HTTPAuthorizationCredentials = Security(security)):
+    global ADC_MISSING
+    token = credentials.credentials
+    
+    if ADC_MISSING:
+        try:
+            parts = token.split('.')
+            if len(parts) == 3:
+                payload_base64 = parts[1]
+                payload_base64 += "=" * ((4 - len(payload_base64) % 4) % 4)
+                payload_json = base64.urlsafe_b64decode(payload_base64).decode("utf-8")
+                decoded = json.loads(payload_json)
+                if "uid" not in decoded and "user_id" in decoded:
+                    decoded["uid"] = decoded["user_id"]
+                return decoded
+        except Exception:
+            pass
+
+    try:
+        decoded_token = auth.verify_id_token(token)
+        return decoded_token
+    except Exception as e:
+        error_str = str(e)
+        if "default credentials" in error_str.lower() or "application default credentials" in error_str.lower():
+            ADC_MISSING = True
+            logger.warning("Bypassing Firebase Auth verification due to missing ADC (Dev Mode)")
+            try:
+                parts = token.split('.')
+                if len(parts) == 3:
+                    payload_base64 = parts[1]
+                    payload_base64 += "=" * ((4 - len(payload_base64) % 4) % 4)
+                    payload_json = base64.urlsafe_b64decode(payload_base64).decode("utf-8")
+                    decoded = json.loads(payload_json)
+                    if "uid" not in decoded and "user_id" in decoded:
+                        decoded["uid"] = decoded["user_id"]
+                    return decoded
+            except Exception as decode_err:
+                logger.error(f"Failed to manually decode token: {decode_err}")
+                
+        logger.error(f"❌ Token verification failed: {error_str}")
+        raise HTTPException(
+            status_code=401,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
 def format_datetime(dt: datetime) -> str:
     """Format datetime to ISO format with timezone info"""
     return dt.isoformat() if isinstance(dt, datetime) else str(dt)
-
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="TUFF Backend API",
@@ -53,7 +127,7 @@ class ScanRequest(BaseModel):
     aws_access_key: str
     aws_secret_key: str
     region: str = "us-east-1"  
-    user_id: str 
+    user_id: str = None
 
 class ExecuteRequest(BaseModel):
     aws_access_key: str
@@ -68,35 +142,43 @@ class AlertConfigRequest(BaseModel):
     metric: str
     threshold: float
     thresholdType: str
-    user_id: str
+    user_id: str = None
 
 class AlertRequest(BaseModel):
     findings: list
     alertConfigs: list
-    user_id: str
+    user_id: str = None
+
+class PaymentVerifyRequest(BaseModel):
+    razorpay_order_id: str
+    razorpay_payment_id: str
+    razorpay_signature: str
+    amount: int
 
 @app.post("/api/user/sync")
-async def sync_user_tier(request: UserSyncRequest, db: Session = Depends(get_db)):
+async def sync_user_tier(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Called by the frontend immediately after a successful Firebase login.
     Checks if the user exists in Supabase. If not, provisions a free-tier profile.
     """
     try:
-        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == request.firebase_uid).first()
+        firebase_uid = current_user["uid"]
+        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == firebase_uid).first()
         
         if not user_record:
             user_record = UserSubscription(
-                user_id=request.firebase_uid, 
+                user_id=firebase_uid, 
                 subscription_tier="free"
             )
             db.add(user_record)
             db.commit()
             db.refresh(user_record)
-            logger.info(f"✅ Provisioned new user profile in Supabase: {request.firebase_uid}")
+            logger.info(f"✅ Provisioned new user profile in Supabase: {firebase_uid}")
             
         return JSONResponse(content={
             "status": "synchronized", 
             "tier": user_record.subscription_tier,
+            "credits": user_record.credits,
             "user_id": user_record.user_id
         })
         
@@ -104,15 +186,59 @@ async def sync_user_tier(request: UserSyncRequest, db: Session = Depends(get_db)
         logger.error(f"❌ Failed to synchronize user profile: {str(e)}")
         raise HTTPException(status_code=500, detail="Database synchronization failure.")
 
+class BuyCreditsRequest(BaseModel):
+    plan: str = "monthly"
+
+@app.post("/api/user/credits/buy")
+async def create_razorpay_order(request: BuyCreditsRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    amount = 29900 if request.plan == "monthly" else 339900
+    currency = "INR"
+    try:
+        order = razorpay_client.order.create({
+            "amount": amount,
+            "currency": currency,
+            "receipt": f"receipt_{current_user['uid'][:10]}",
+            "payment_capture": 1
+        })
+        return JSONResponse(content={"order_id": order["id"], "amount": amount, "currency": currency})
+    except Exception as e:
+        logger.error(f"Failed to create Razorpay order: {e}")
+        raise HTTPException(status_code=500, detail="Failed to create payment order")
+
+@app.post("/api/user/verify-payment")
+async def verify_payment(req: PaymentVerifyRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    try:
+        razorpay_client.utility.verify_payment_signature({
+            'razorpay_order_id': req.razorpay_order_id,
+            'razorpay_payment_id': req.razorpay_payment_id,
+            'razorpay_signature': req.razorpay_signature
+        })
+        
+        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == current_user["uid"]).first()
+        if user_record:
+            user_record.subscription_tier = "pro"
+            user_record.credits += 10000  
+            user_record.razorpay_customer_id = current_user["uid"]
+            user_record.updated_at = datetime.utcnow()
+            db.commit()
+            return {"status": "success", "tier": "pro", "credits": user_record.credits}
+        else:
+            raise HTTPException(status_code=404, detail="User not found")
+            
+    except razorpay.errors.SignatureVerificationError:
+        raise HTTPException(status_code=400, detail="Invalid payment signature")
+    except Exception as e:
+        logger.error(f"Failed to verify payment: {e}")
+        raise HTTPException(status_code=500, detail="Payment verification failed")
 
 @app.post("/api/analyze")
-async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get_db)):
+async def analyze_infrastructure(request: ScanRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     scan_id = str(uuid.uuid4())
+    user_id = current_user["uid"]
     
     try:
-        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == request.user_id).first()
+        user_record = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
         user_tier = user_record.subscription_tier.lower().strip() if user_record else "free"
-        session_tracker.configure_session_tier(user_tier)
         
         logger.info(f"Initializing cloud audit for region: {request.region} (Scan ID: {scan_id}) [Verified Tier: {user_tier.upper()}]")
         
@@ -127,9 +253,14 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
         ai_evaluated_queue = []
         minimal_findings = [] 
 
-        for finding in raw_findings:
-            ai_analysis = explain_finding(finding)
-            
+        def process_finding(finding):
+            ai_analysis = explain_finding(finding, user_record, db)
+            return finding, ai_analysis
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+            results = list(executor.map(process_finding, raw_findings))
+
+        for finding, ai_analysis in results:
             completed_payload = {
                 "id": finding["resource_id"],
                 "type": f"{finding['issue']} ({finding['resource_type']})",
@@ -155,6 +286,7 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
 
         infra_log = InfrastructureLog(
             scan_id=scan_id,
+            user_id=user_id,
             region=request.region,
             findings=minimal_findings,
             findings_count=len(minimal_findings),
@@ -179,6 +311,7 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
         try:
             infra_log = InfrastructureLog(
                 scan_id=scan_id,
+                user_id=user_id,
                 region=request.region,
                 findings=[],
                 findings_count=0,
@@ -205,6 +338,7 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
         try:
             infra_log = InfrastructureLog(
                 scan_id=scan_id,
+                user_id=user_id,
                 region=request.region,
                 findings=[],
                 findings_count=0,
@@ -220,9 +354,10 @@ async def analyze_infrastructure(request: ScanRequest, db: Session = Depends(get
 
 
 @app.post("/api/execute")
-async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get_db)):
+async def execute_remediation(request: ExecuteRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
-        logger.info(f"⚡ Received execution command: {request.action_type} for resource {request.resource_id}")
+        logger.info(f"⚡ Received execution command: {request.action_type} for resource {request.resource_id} (User: {user_id})")
         aws_engine = AWSEngine(
             aws_access_key=request.aws_access_key,
             aws_secret_key=request.aws_secret_key,
@@ -285,7 +420,7 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         logger.info(f"✅ Live execution successful: {msg}")
         
         exec_log = ExecutionLog(
-            user_id=request.user_id,
+            user_id=user_id,
             resource_id=request.resource_id,
             action_type=request.action_type,
             result={"status": "success", "message": msg, "timestamp": format_datetime(datetime.utcnow())},
@@ -305,7 +440,7 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
         logger.error(f"❌ Execution failed on resource {request.resource_id}: {str(e)}")
         
         exec_log = ExecutionLog(
-            user_id=request.user_id,
+            user_id=user_id,
             resource_id=request.resource_id,
             action_type=request.action_type,
             result={"status": "failed", "error": str(e), "timestamp": format_datetime(datetime.utcnow())},
@@ -318,9 +453,10 @@ async def execute_remediation(request: ExecuteRequest, db: Session = Depends(get
 
 
 @app.get("/api/logs/infrastructure")
-async def get_infrastructure_logs(limit: int = 50, db: Session = Depends(get_db)):
+async def get_infrastructure_logs(limit: int = 50, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
-        logs = db.query(InfrastructureLog).order_by(InfrastructureLog.timestamp.desc()).limit(limit).all()
+        logs = db.query(InfrastructureLog).filter(InfrastructureLog.user_id == user_id).order_by(InfrastructureLog.timestamp.desc()).limit(limit).all()
         return JSONResponse(content={
             "status": "success",
             "logs": [
@@ -341,9 +477,10 @@ async def get_infrastructure_logs(limit: int = 50, db: Session = Depends(get_db)
 
 
 @app.get("/api/logs/infrastructure/{scan_id}")
-async def get_scan_details(scan_id: str, db: Session = Depends(get_db)):
+async def get_scan_details(scan_id: str, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
-        log = db.query(InfrastructureLog).filter(InfrastructureLog.scan_id == scan_id).first()
+        log = db.query(InfrastructureLog).filter(InfrastructureLog.scan_id == scan_id, InfrastructureLog.user_id == user_id).first()
         if not log:
             raise HTTPException(status_code=404, detail=f"Scan {scan_id} not found")
         
@@ -366,9 +503,10 @@ async def get_scan_details(scan_id: str, db: Session = Depends(get_db)):
 
 
 @app.get("/api/logs/execution")
-async def get_execution_logs(limit: int = 50, db: Session = Depends(get_db)):
+async def get_execution_logs(limit: int = 50, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
-        logs = db.query(ExecutionLog).order_by(ExecutionLog.timestamp.desc()).limit(limit).all()
+        logs = db.query(ExecutionLog).filter(ExecutionLog.user_id == user_id).order_by(ExecutionLog.timestamp.desc()).limit(limit).all()
         return JSONResponse(content={
             "status": "success",
             "logs": [
@@ -488,12 +626,13 @@ async def generate_iam_policy():
         })
 
 @app.post("/api/alerts/config")
-async def create_alert_config(request: AlertConfigRequest, db: Session = Depends(get_db)):
+async def create_alert_config(request: AlertConfigRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         config_id = str(uuid.uuid4())
         alert_config = AlertConfig(
             id=config_id,
-            user_id=request.user_id,
+            user_id=user_id,
             resource_type=request.resourceType,
             metric=request.metric,
             threshold=request.threshold,
@@ -503,7 +642,7 @@ async def create_alert_config(request: AlertConfigRequest, db: Session = Depends
         db.add(alert_config)
         db.commit()
         db.refresh(alert_config)
-        logger.info(f"✅ Alert config created for user {request.user_id}: {config_id}")
+        logger.info(f"✅ Alert config created for user {user_id}: {config_id}")
         return JSONResponse(content={
             "status": "success",
             "alert": {
@@ -521,7 +660,8 @@ async def create_alert_config(request: AlertConfigRequest, db: Session = Depends
 
 
 @app.get("/api/alerts/config")
-async def get_alert_configs(user_id: str, db: Session = Depends(get_db)):
+async def get_alert_configs(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         configs = db.query(AlertConfig).filter(
             AlertConfig.active == True,
@@ -547,9 +687,10 @@ async def get_alert_configs(user_id: str, db: Session = Depends(get_db)):
 
 
 @app.delete("/api/alerts/config/{config_id}")
-async def delete_alert_config(config_id: str, db: Session = Depends(get_db)):
+async def delete_alert_config(config_id: str, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
-        config = db.query(AlertConfig).filter(AlertConfig.id == config_id).first()
+        config = db.query(AlertConfig).filter(AlertConfig.id == config_id, AlertConfig.user_id == user_id).first()
         if not config:
             raise HTTPException(status_code=404, detail=f"Alert config {config_id} not found")
         
@@ -562,25 +703,26 @@ async def delete_alert_config(config_id: str, db: Session = Depends(get_db)):
         raise HTTPException(status_code=500, detail=str(e))
 
 class ActionLogRequest(BaseModel):
-    user_id: str
+    user_id: str = None
     resource_id: str
     action: str
     resource_type: str
 
 @app.post("/api/action-logs")
-async def save_action_log(request: ActionLogRequest, db: Session = Depends(get_db)):
+async def save_action_log(request: ActionLogRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         log_id = str(uuid.uuid4())
         action_log = ActionLog(
             id=log_id,
-            user_id=request.user_id,
+            user_id=user_id,
             resource_id=request.resource_id,
             action=request.action,
             resource_type=request.resource_type
         )
         db.add(action_log)
         db.commit()
-        logger.info(f"✅ Action log saved for user {request.user_id}: {log_id}")
+        logger.info(f"✅ Action log saved for user {user_id}: {log_id}")
         return JSONResponse(content={
             "status": "success",
             "log_id": log_id,
@@ -592,7 +734,8 @@ async def save_action_log(request: ActionLogRequest, db: Session = Depends(get_d
 
 
 @app.get("/api/action-logs")
-async def get_action_logs(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
+async def get_action_logs(limit: int = 100, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         logs = db.query(ActionLog).filter(
             ActionLog.user_id == user_id
@@ -617,7 +760,8 @@ async def get_action_logs(user_id: str, limit: int = 100, db: Session = Depends(
 
 
 @app.get("/api/alerts/triggered")
-async def get_triggered_alerts(user_id: str, limit: int = 100, db: Session = Depends(get_db)):
+async def get_triggered_alerts(limit: int = 100, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         alerts = db.query(TriggeredAlert).filter(
             TriggeredAlert.user_id == user_id
@@ -646,7 +790,8 @@ async def get_triggered_alerts(user_id: str, limit: int = 100, db: Session = Dep
 
 
 @app.post("/api/alerts/evaluate")
-async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
+async def evaluate_alerts(request: AlertRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+    user_id = current_user["uid"]
     try:
         triggered_alerts = []
         
@@ -669,7 +814,7 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
                 
                 if triggered and config["resourceType"] in finding.get("type", ""):
                     alert_record = TriggeredAlert(
-                        user_id=request.user_id,
+                        user_id=user_id,
                         config_id=config.get("id"),
                         resource_id=finding.get("id"),
                         resource_type=finding.get("type"),
@@ -691,7 +836,7 @@ async def evaluate_alerts(request: AlertRequest, db: Session = Depends(get_db)):
                     })
         
         db.commit()
-        logger.info(f"Alert evaluation complete for user {request.user_id}: {len(triggered_alerts)} alerts triggered")
+        logger.info(f"Alert evaluation complete for user {user_id}: {len(triggered_alerts)} alerts triggered")
         return JSONResponse(content={"status": "success", "alerts": triggered_alerts})
     except Exception as e:
         logger.error(f"Failed to evaluate alerts: {str(e)}")

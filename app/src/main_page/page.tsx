@@ -9,13 +9,14 @@ import ResourceScanner from "@/app/components/ResourceScanner";
 import LogsPanel from "@/app/components/LogsPanel";
 import AlertsPanel from "@/app/components/AlertsPanel";
 import FindingsPanel from "@/app/components/FindingsPanel";
+import PricingModal from "@/app/components/PricingModal";
+import HelpPanel from "@/app/components/HelpPanel";
 import {
   Home,
   BarChart3,
   Wallet,
   FileText,
   Bell,
-  Settings,
   HelpCircle,
   LogOut,
 } from "lucide-react";
@@ -31,7 +32,7 @@ export default function MainPage() {
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
   const [activeTab, setActiveTab] = useState<
-    "all" | "cost" | "security" | "logs" | "alerts"
+    "all" | "cost" | "security" | "logs" | "alerts" | "help"
   >("all");
   const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
   const [showAwsForm, setShowAwsForm] = useState(false);
@@ -41,6 +42,10 @@ export default function MainPage() {
   const [costTabScanned, setCostTabScanned] = useState(false);
 
   const [totalSavings, setTotalSavings] = useState(0);
+
+  const [tier, setTier] = useState<string>("free");
+  const [credits, setCredits] = useState<number>(0);
+  const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
 
   const [alertConfigs, setAlertConfigs] = useState<any[]>([]);
   const [triggeredAlerts, setTriggeredAlerts] = useState<any[]>([]);
@@ -62,22 +67,43 @@ export default function MainPage() {
 
   useEffect(() => {
     const loadUserData = async () => {
-      if (!user?.email) return;
+      if (!user) return;
 
       try {
-        const alertsRes = await fetch(
-          `${api.endpoints.alertsConfig}?user_id=${user.email}`,
-        );
-        if (alertsRes.ok) {
-          const alertsData = await alertsRes.json();
+        const token = await user.getIdToken();
+        const headers = {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`,
+        };
+
+        const syncPromise = fetch(`${api.baseURL}/api/user/sync`, { method: "POST", headers })
+          .then(res => res.ok ? res.json() : null)
+          .catch(e => devLog("Sync failed:", e));
+
+        const alertsPromise = fetch(api.endpoints.alertsConfig, { headers })
+          .then(res => res.ok ? res.json() : null)
+          .catch(e => null);
+          
+        const logsPromise = fetch(api.endpoints.actionLogs, { headers })
+          .then(res => res.ok ? res.json() : null)
+          .catch(e => null);
+
+        const triggeredPromise = fetch(api.endpoints.alertsTriggered, { headers })
+          .then(res => res.ok ? res.json() : null)
+          .catch(e => null);
+
+        const [syncData, alertsData, logsData, triggeredData] = await Promise.all([
+          syncPromise, alertsPromise, logsPromise, triggeredPromise
+        ]);
+
+        if (syncData) {
+          setTier(syncData.tier);
+          setCredits(syncData.credits);
+        }
+        if (alertsData) {
           setAlertConfigs(alertsData.configs || []);
         }
-
-        const logsRes = await fetch(
-          `${api.endpoints.actionLogs}?user_id=${user.email}`,
-        );
-        if (logsRes.ok) {
-          const logsData = await logsRes.json();
+        if (logsData) {
           const formattedLogs = logsData.logs.map((log: any) => ({
             id: log.id,
             resourceId: log.resource_id,
@@ -87,21 +113,17 @@ export default function MainPage() {
           }));
           setActionHistory(formattedLogs);
         }
-
-        const triggeredRes = await fetch(
-          `${api.endpoints.alertsTriggered}?user_id=${user.email}`,
-        );
-        if (triggeredRes.ok) {
-          const triggeredData = await triggeredRes.json();
+        if (triggeredData) {
           setTriggeredAlerts(triggeredData.alerts || []);
         }
+
       } catch (err) {
         devError("Failed to load user data:", err);
       }
     };
 
     loadUserData();
-  }, [user?.email]);
+  }, [user, activeTab]); 
 
   useEffect(() => {
     const activeFindings = findings.filter((f) => !dismissed.has(f.id));
@@ -154,19 +176,27 @@ export default function MainPage() {
 
     setTriggeredAlerts(newTriggeredAlerts);
 
-    if (alertConfigs.length > 0 && findings.length > 0) {
-      try {
-        fetch(api.endpoints.alertsEvaluate, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            findings: findings,
-            alertConfigs: alertConfigs,
-          }),
-        }).catch((err) => devLog("Backend alert evaluation optional:", err));
-      } catch (err) {
-        devLog("Backend connection not available");
-      }
+    if (alertConfigs.length > 0 && findings.length > 0 && user) {
+      const evaluateAlertsBackend = async () => {
+        try {
+          const token = await user.getIdToken();
+          const headers = {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${token}`,
+          };
+          fetch(api.endpoints.alertsEvaluate, {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              findings: findings,
+              alertConfigs: alertConfigs,
+            }),
+          }).catch((err) => devLog("Backend alert evaluation optional:", err));
+        } catch (err) {
+          devLog("Backend connection not available", err);
+        }
+      };
+      evaluateAlertsBackend();
     }
   }, [findings, alertConfigs, dismissed]);
 
@@ -195,7 +225,7 @@ export default function MainPage() {
   const handleApprove = async (id: string) => {
     const targetFinding = findings.find((f) => f.id === id);
     if (!targetFinding) return;
-    if (!user?.email) {
+    if (!user) {
       setError("User not authenticated");
       return;
     }
@@ -219,9 +249,15 @@ export default function MainPage() {
       setError(null);
       setApproved((prev) => new Set(prev).add(id));
 
+      const token = await user.getIdToken();
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      };
+
       const response = await fetch(api.endpoints.execute, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           aws_access_key: keyToSend,
           aws_secret_key: secretToSend,
@@ -237,27 +273,28 @@ export default function MainPage() {
       });
 
       if (response.ok) {
-        const logEntry = {
-          id: Math.random().toString(36),
-          resourceId: id,
-          action: "Approved",
-          type: targetFinding.type,
-          timestamp: new Date().toLocaleString(),
-        };
-
-        setActionHistory((prev) => [...prev, logEntry]);
-
         try {
-          fetch(api.endpoints.actionLogs, {
+          const res = await fetch(api.endpoints.actionLogs, {
             method: "POST",
-            headers: { "Content-Type": "application/json" },
+            headers,
             body: JSON.stringify({
               user_id: user.email,
               resource_id: id,
               action: "Approved",
               resource_type: targetFinding.type,
             }),
-          }).catch((err) => devLog("Backend sync optional:", err));
+          });
+          if (res.ok) {
+            const data = await res.json();
+            const logEntry = {
+              id: data.log_id,
+              resourceId: id,
+              action: "Approved",
+              type: targetFinding.type,
+              timestamp: data.timestamp,
+            };
+            setActionHistory((prev) => [logEntry, ...prev]);
+          }
         } catch (err) {
           devLog("Backend connection not available");
         }
@@ -313,9 +350,15 @@ export default function MainPage() {
     }
 
     try {
+      const token = await user.getIdToken();
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      };
+
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           aws_access_key: keyId || "demo",
           aws_secret_key: secretKey || "12345",
@@ -353,31 +396,42 @@ export default function MainPage() {
     }
   };
 
-  const handleAddAlert = () => {
-    if (!newAlert.threshold) {
+  const handleAddAlert = async (alertData: Omit<any, "id">) => {
+    if (!alertData.threshold) {
       setError("Please set a threshold value");
       return;
     }
-    if (!user?.email) {
+    if (!user) {
       setError("User not authenticated");
       return;
     }
 
-    const alert = {
-      id: Math.random().toString(36),
-      ...newAlert,
-    };
-    setAlertConfigs((prev) => [...prev, alert]);
-
     try {
-      fetch(api.endpoints.alertsConfig, {
+      const token = await user.getIdToken();
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      };
+      const res = await fetch(api.endpoints.alertsConfig, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
-          ...newAlert,
+          ...alertData,
           user_id: user.email,
         }),
-      }).catch((err) => devLog("Backend sync optional:", err));
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const alert = {
+          id: data.alert.id,
+          ...alertData,
+        };
+        setAlertConfigs((prev) => [...prev, alert]);
+      } else {
+        const errData = await res.json();
+        setError(errData.detail || "Failed to save alert");
+        return;
+      }
     } catch (err) {
       devLog("Backend connection not available");
     }
@@ -392,47 +446,61 @@ export default function MainPage() {
     setError(null);
   };
 
-  const handleRemoveAlert = (alertId: string) => {
+  const handleRemoveAlert = async (alertId: string) => {
     setAlertConfigs((prev) => prev.filter((a) => a.id !== alertId));
 
+    if (!user) return;
+
     try {
-      fetch(`${api.endpoints.alertsConfig}/${alertId}`, {
+      const token = await user.getIdToken();
+      const headers = {
+        "Authorization": `Bearer ${token}`,
+      };
+      await fetch(`${api.endpoints.alertsConfig}/${alertId}`, {
         method: "DELETE",
-      }).catch((err) => devLog("Backend sync optional:", err));
+        headers,
+      });
     } catch (err) {
       devLog("Backend connection not available");
     }
   };
 
-  const handleDismissWithHistory = (id: string, finding: any) => {
-    if (!user?.email) {
+  const handleDismissWithHistory = async (id: string, finding: any) => {
+    if (!user) {
       setError("User not authenticated");
       return;
     }
 
-    const logEntry = {
-      id: Math.random().toString(36),
-      resourceId: id,
-      action: "Dismissed",
-      type: finding.type,
-      timestamp: new Date().toLocaleString(),
-    };
-
-    setActionHistory((prev) => [...prev, logEntry]);
     setDismissed((prev) => new Set(prev).add(id));
     if (selectedFinding?.id === id) setSelectedFinding(null);
 
     try {
-      fetch(api.endpoints.actionLogs, {
+      const token = await user.getIdToken();
+      const headers = {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${token}`,
+      };
+      const res = await fetch(api.endpoints.actionLogs, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify({
           user_id: user.email,
           resource_id: id,
           action: "Dismissed",
           resource_type: finding.type,
         }),
-      }).catch((err) => devLog("Backend sync optional:", err));
+      });
+      if (res.ok) {
+        const data = await res.json();
+        const logEntry = {
+          id: data.log_id,
+          resourceId: id,
+          action: "Dismissed",
+          type: finding.type,
+          timestamp: data.timestamp,
+        };
+        setActionHistory((prev) => [logEntry, ...prev]);
+      }
     } catch (err) {
       devLog("Backend connection not available");
     }
@@ -478,11 +546,6 @@ export default function MainPage() {
             <Bell size={18} />
             <span>Alerts</span>
           </button>
-
-          <button className={styles.navItem}>
-            <Settings size={18} />
-            <span>Settings</span>
-          </button>
         </nav>
 
         <div className={styles.sidebarBottom}>
@@ -512,7 +575,10 @@ export default function MainPage() {
             <span>Connect AWS Account</span>
           </button>
 
-          <button className={styles.navItem}>
+          <button 
+            className={`${styles.navItem} ${activeTab === "help" ? styles.active : ""}`}
+            onClick={() => setActiveTab("help")}
+          >
             <HelpCircle size={18} />
             <span>Help</span>
           </button>
@@ -541,8 +607,40 @@ export default function MainPage() {
             {activeTab === "cost" && "Cost Explorer"}
             {activeTab === "logs" && "Previous Actions & Logs"}
             {activeTab === "alerts" && "Alert Configuration & History"}
+            {activeTab === "help" && "Help & Documentation"}
           </h1>
           <div className={styles.topbarRight}>
+            <div className="flex items-center gap-3 mr-4">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', borderRadius: '20px', border: '1px solid rgba(139, 115, 85, 0.3)', background: 'rgba(139, 115, 85, 0.05)' }}>
+                <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: tier === 'pro' ? '#8b7355' : 'rgba(139, 115, 85, 0.4)', boxShadow: tier === 'pro' ? '0 0 8px rgba(139, 115, 85, 0.6)' : 'none' }}></div>
+                <span style={{ fontSize: '13px', fontWeight: 500, color: '#8b7355', textTransform: 'capitalize', fontFamily: 'Jost, sans-serif' }}>{tier} Plan</span>
+                <span style={{ fontSize: '11px', color: '#8b7355', background: 'rgba(139, 115, 85, 0.1)', padding: '2px 8px', borderRadius: '12px', marginLeft: '4px', fontFamily: 'Jost, sans-serif' }}>{credits} Credits</span>
+              </div>
+              {tier !== 'pro' && (
+                <button 
+                  onClick={() => setIsPricingModalOpen(true)}
+                  style={{
+                    background: 'linear-gradient(135deg, rgba(139, 115, 85, 0.9), rgba(110, 90, 65, 0.9))',
+                    color: '#fff',
+                    border: 'none',
+                    padding: '8px 16px',
+                    borderRadius: '20px',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    fontFamily: 'Jost, sans-serif',
+                    cursor: 'pointer',
+                    boxShadow: '0 4px 12px rgba(139, 115, 85, 0.2)',
+                    transition: 'all 0.2s ease',
+                    letterSpacing: '0.05em',
+                    textTransform: 'uppercase'
+                  }}
+                  onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-1px)'}
+                  onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                >
+                  Upgrade
+                </button>
+              )}
+            </div>
             <button className={styles.dateBtn}>
               {new Date().toLocaleDateString()}
             </button>
@@ -567,7 +665,8 @@ export default function MainPage() {
 
         {activeTab !== "cost" &&
           activeTab !== "logs" &&
-          activeTab !== "alerts" && (
+          activeTab !== "alerts" &&
+          activeTab !== "help" && (
             <StatsPanel
               findings={findings}
               dismissed={dismissed}
@@ -597,12 +696,17 @@ export default function MainPage() {
                 ✕
               </button>
             </div>
-            <AwsConnectForm onScanComplete={handleScanSuccess} />
+            <AwsConnectForm 
+              onScanComplete={handleScanSuccess} 
+              onTokenLimit={() => setIsPricingModalOpen(true)}
+            />
           </div>
         )}
 
         <div className={styles.chartGrid}>
-          {activeTab === "logs" ? (
+          {activeTab === "help" ? (
+            <HelpPanel onUpgradeClick={() => setIsPricingModalOpen(true)} />
+          ) : activeTab === "logs" ? (
             <LogsPanel actionHistory={actionHistory} />
           ) : activeTab === "alerts" ? (
             <AlertsPanel
@@ -628,6 +732,14 @@ export default function MainPage() {
           )}
         </div>
       </main>
+      <PricingModal
+        isOpen={isPricingModalOpen}
+        onClose={() => setIsPricingModalOpen(false)}
+        onSuccess={(newCredits, newTier) => {
+          setCredits(newCredits);
+          setTier(newTier);
+        }}
+      />
     </div>
   );
 }
