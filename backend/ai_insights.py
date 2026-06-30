@@ -14,6 +14,11 @@ client = OpenAI(
     api_key=os.getenv("OPENROUTER_API_KEY")
 )
 
+groq_client = OpenAI(
+    base_url="https://api.groq.com/openai/v1",
+    api_key=os.getenv("GROQ_API_KEY")
+)
+
 def encode_image_to_base64(image_path: str) -> str:
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
@@ -55,6 +60,7 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
     {json.dumps(finding, indent=2)}
     """
 
+    response = None
     try:
         response = client.chat.completions.create(
             model=model_name,
@@ -71,20 +77,38 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
             response_format={"type": "json_object"}, 
             temperature=0.1
         )
+    except openai.APIStatusError as e:
+        if e.status_code in (402, 403):
+            try:
+                response = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are an automated cloud data parser. Respond exclusively with valid JSON."
+                        },
+                        {
+                            "role": "user",
+                            "content": build_dynamic_payload(prompt, image_path)
+                        }
+                    ],
+                    response_format={"type": "json_object"}, 
+                    temperature=0.1
+                )
+            except Exception as fallback_e:
+                raise RuntimeError(f"ERROR_INSUFFICIENT_FUNDS: OpenRouter account lacks credits and Groq fallback failed. ({str(e)}) - {str(fallback_e)}")
+        else:
+            raise RuntimeError(f"ERROR_UPSTREAM_API: AI Provider error occurred. ({str(e)})")
+    except openai.RateLimitError as e:
+        raise RuntimeError(f"ERROR_QUOTA_EXCEEDED: Account token limit breached. ({str(e)})")
+    except Exception as e:
+        raise RuntimeError(f"ERROR_INTERNAL_PARSING: Failed to process infrastructure payload. ({str(e)})")
         
+    if response:
         if user_record.credits > 0:
             user_record.credits -= 100  # token usage approximation
             db.commit()
 
         return json.loads(response.choices[0].message.content)
-
-    except openai.RateLimitError as e:
-        raise RuntimeError(f"ERROR_QUOTA_EXCEEDED: Account token limit breached. ({str(e)})")
-        
-    except openai.APIStatusError as e:
-        if e.status_code == 402:
-            raise RuntimeError(f"ERROR_INSUFFICIENT_FUNDS: OpenRouter account lacks credits. ({str(e)})")
-        raise RuntimeError(f"ERROR_UPSTREAM_API: AI Provider error occurred. ({str(e)})")
-        
-    except Exception as e:
-        raise RuntimeError(f"ERROR_INTERNAL_PARSING: Failed to process infrastructure payload. ({str(e)})")
+    else:
+        raise RuntimeError("ERROR_INTERNAL_PARSING: No response generated from AI providers.")
