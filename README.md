@@ -2,6 +2,8 @@
 
 > **Cloud Infrastructure Analysis Engine**
 
+<img width="1000" height="500" alt="EDIT-Screenshot 2026-06-05 174329" src="https://github.com/user-attachments/assets/b9cf7831-7ef8-4775-a152-8138d8f6f6fb" />
+
 Tuff is a production-ready analyzer that connects to your AWS environment to optimize resources, slash costs, and harden security using AI-driven insights.
 
 ## Features
