@@ -186,6 +186,91 @@ async def sync_user_tier(current_user: dict = Depends(get_current_user), db: Ses
         logger.error(f"❌ Failed to synchronize user profile: {str(e)}")
         raise HTTPException(status_code=500, detail="Database synchronization failure.")
 
+@app.post("/api/webhooks/aws")
+async def aws_eventbridge_webhook(request: Request, db: Session = Depends(get_db)):
+    """
+    Webhook endpoint to receive real-time updates from AWS EventBridge/SNS.
+    Requires an EventBridge rule configured to send events to this endpoint.
+    """
+    try:
+        payload = await request.json()
+        
+        if payload.get("Type") == "SubscriptionConfirmation":
+            subscribe_url = payload.get("SubscribeURL")
+            if subscribe_url:
+                import httpx
+                async with httpx.AsyncClient() as client:
+                    await client.get(subscribe_url)
+                logger.info("Successfully confirmed SNS subscription.")
+            return {"status": "confirmed"}
+            
+        message = payload.get("Message")
+        if isinstance(message, str):
+            try:
+                import json
+                event = json.loads(message)
+            except:
+                event = payload
+        else:
+            event = payload
+
+        detail = event.get("detail", {})
+        event_name = detail.get("eventName", "")
+        
+        deleted_resource_ids = []
+        
+        if event_name == "TerminateInstances":
+            instances = detail.get("requestParameters", {}).get("instancesSet", {}).get("items", [])
+            for inst in instances:
+                if "instanceId" in inst:
+                    deleted_resource_ids.append(inst["instanceId"])
+                    
+        elif event_name == "DeleteVolume":
+            vol_id = detail.get("requestParameters", {}).get("volumeId")
+            if vol_id:
+                deleted_resource_ids.append(vol_id)
+                
+        elif event_name == "DeleteDBInstance":
+            db_id = detail.get("requestParameters", {}).get("dBInstanceIdentifier")
+            if db_id:
+                deleted_resource_ids.append(db_id)
+
+        elif event_name == "DeleteBucket":
+            bucket = detail.get("requestParameters", {}).get("bucketName")
+            if bucket:
+                deleted_resource_ids.append(bucket)
+                
+        if not deleted_resource_ids:
+            return {"status": "ignored", "reason": "Not a recognized deletion event"}
+            
+        logger.info(f"Real-time update: Resources {deleted_resource_ids} were deleted in AWS. Updating database...")
+        
+        from sqlalchemy import desc
+        recent_logs = db.query(InfrastructureLog).order_by(desc(InfrastructureLog.timestamp)).limit(100).all()
+        
+        updated_count = 0
+        for log in recent_logs:
+            original_findings = log.findings
+            if not original_findings:
+                continue
+                
+            new_findings = [f for f in original_findings if f.get("id") not in deleted_resource_ids]
+            
+            if len(new_findings) != len(original_findings):
+                log.findings = new_findings
+                log.findings_count = len(new_findings)
+                updated_count += 1
+                
+        if updated_count > 0:
+            db.commit()
+            logger.info(f"Successfully updated {updated_count} infrastructure logs based on real-time AWS events.")
+            
+        return {"status": "success", "updated_logs": updated_count}
+        
+    except Exception as e:
+        logger.error(f"Error processing AWS webhook: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
 class BuyCreditsRequest(BaseModel):
     plan: str = "monthly"
 
@@ -543,6 +628,7 @@ async def generate_iam_policy():
         6. Can delete VPCs
         7. Can modify instance types
         8. Can read CloudWatch metrics
+        9. Can configure AWS EventBridge rules, API Destinations, and SNS topics to send real-time deletion events to TUFF's webhook
         
         Respond ONLY with valid JSON in this exact format:
         {

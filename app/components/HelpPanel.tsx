@@ -75,6 +75,31 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
         }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
             <div style={{ padding: '10px', background: 'rgba(139, 115, 85, 0.1)', borderRadius: '12px' }}>
+              <Zap style={{ color: '#8b7355', width: '24px', height: '24px' }} />
+            </div>
+            <h3 style={{ fontSize: '22px', fontWeight: 600, color: '#6b5344' }}>Real-Time EventBridge Sync</h3>
+          </div>
+          
+          <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', color: '#8b7355' }}>
+            <p>TUFF supports real-time dashboard synchronization when cloud resources are deleted via the AWS console. To enable this, set up an AWS EventBridge webhook:</p>
+            <ol style={{ paddingLeft: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
+              <li><strong>IAM Permissions:</strong> Ensure your TUFF IAM user has permissions to configure EventBridge. You can use our AI Policy Generator to automatically generate the necessary JSON for this!</li>
+              <li><strong>Create EventBridge Rule:</strong> Navigate to Amazon EventBridge, and create a rule matching AWS API Call via CloudTrail for deletion events (e.g., <code>TerminateInstances</code>, <code>DeleteVolume</code>).</li>
+              <li><strong>Set the Target:</strong> Configure an API Destination (or an SNS Topic with HTTP subscription) pointing to your hosted TUFF Webhook URL: <code>/api/webhooks/aws</code>.</li>
+              <li><strong>Confirm:</strong> TUFF automatically handles SNS Subscription Confirmations. Once active, your dashboard will seamlessly update in real-time when resources are deleted directly in AWS.</li>
+            </ol>
+          </div>
+        </section>
+
+        <section style={{ 
+          background: 'rgba(255, 255, 255, 0.5)', 
+          borderRadius: '16px', 
+          padding: '32px',
+          border: '1px solid rgba(139, 115, 85, 0.15)',
+          boxShadow: '0 10px 30px rgba(139, 115, 85, 0.05)'
+        }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px', marginBottom: '20px' }}>
+            <div style={{ padding: '10px', background: 'rgba(139, 115, 85, 0.1)', borderRadius: '12px' }}>
               <BookOpen style={{ color: '#8b7355', width: '24px', height: '24px' }} />
             </div>
             <h3 style={{ fontSize: '22px', fontWeight: 600, color: '#6b5344' }}>Application Manual</h3>

@@ -19,6 +19,30 @@ groq_client = OpenAI(
     api_key=os.getenv("GROQ_API_KEY")
 )
 
+def sanitize_payload(data):
+    """
+    Recursively redacts sensitive information from the payload to prevent data leakage to AI providers.
+    This acts as a security and preprocessing layer.
+    """
+    sensitive_keys = {'password', 'secret', 'key', 'token', 'credentials', 'auth', 'authorization', 'api_key', 'access_key', 'private_key'}
+    
+    if isinstance(data, dict):
+        sanitized = {}
+        for k, v in data.items():
+            # Skip empty values to save AI tokens and reduce noise
+            if v in [None, "", [], {}]:
+                continue
+                
+            if any(sensitive in str(k).lower() for sensitive in sensitive_keys):
+                sanitized[k] = "[REDACTED FOR SECURITY]"
+            else:
+                sanitized[k] = sanitize_payload(v)
+        return sanitized
+    elif isinstance(data, list):
+        return [sanitize_payload(item) for item in data if item not in [None, "", [], {}]]
+    else:
+        return data
+
 def encode_image_to_base64(image_path: str) -> str:
     with open(image_path, "rb") as image_file:
         return base64.b64encode(image_file.read()).decode('utf-8')
@@ -42,6 +66,10 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
         raise RuntimeError("ERROR_SESSION_LIMIT_EXCEEDED: You have reached the credit limit for your free tier. Please upgrade to Pro or purchase credits.")
     
     model_name = "openrouter/auto"
+    
+    # Preprocess, secure, and minify payload before sending to external AI models
+    sanitized_finding = sanitize_payload(finding)
+    minified_payload = json.dumps(sanitized_finding, separators=(',', ':'))
 
     prompt = f"""Analyze this cloud infrastructure finding and respond exactly within this JSON schema structure:
     {{
@@ -56,8 +84,9 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
     1. The 'estimated_savings' value MUST ONLY contain a raw number string.
     2. NEVER return conversational text inside the 'estimated_savings' field.
 
-    Cloud Asset Finding Payload:
-    {json.dumps(finding, indent=2)}
+    <cloud_asset_finding_payload>
+    {minified_payload}
+    </cloud_asset_finding_payload>
     """
 
     response = None
