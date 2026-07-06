@@ -130,8 +130,15 @@ export default function FindingsPanel({
                     {f.type.includes("EC2") && (
                       <select
                         onChange={(e) => {
-                          if (e.target.value) {
-                            onApprove(f.id, "scale_instance", e.target.value);
+                          const val = e.target.value;
+                          if (val) {
+                            if (val === "delete") {
+                              if (window.confirm("Warning: Are you sure you want to delete this instance? This action cannot be undone.")) {
+                                onApprove(f.id, "delete_instance");
+                              }
+                            } else {
+                              onApprove(f.id, "scale_instance", val);
+                            }
                             e.target.value = "";
                           }
                         }}
@@ -155,6 +162,7 @@ export default function FindingsPanel({
                         <option value="t3.medium">Scale to t3.medium</option>
                         <option value="t3.large">Scale to t3.large</option>
                         <option value="t3.xlarge">Scale to t3.xlarge</option>
+                        <option value="delete">Delete</option>
                       </select>
                     )}
                     <button

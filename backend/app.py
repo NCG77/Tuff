@@ -457,6 +457,11 @@ async def execute_remediation(request: ExecuteRequest, current_user: dict = Depe
             ec2.stop_instances(InstanceIds=[str(request.resource_id)])
             msg = f"Successfully stopped zombie EC2 instance {request.resource_id}."
 
+        elif request.action_type == "delete_instance":
+            ec2 = session.client('ec2')
+            ec2.terminate_instances(InstanceIds=[str(request.resource_id)])
+            msg = f"Successfully terminated EC2 instance {request.resource_id}."
+
         elif request.action_type == "delete_volume":
             ec2 = session.client('ec2')
             ec2.delete_volume(VolumeId=request.resource_id)
