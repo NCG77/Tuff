@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, useRef, useMemo } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import styles from "@/app/src/main_page/page.module.css";
 
 interface AlertConfig {
@@ -35,6 +36,15 @@ export default function AlertsPanel({
   onRemoveAlert,
 }: AlertsPanelProps) {
   const [showAlertForm, setShowAlertForm] = useState(false);
+  const parentRef = useRef<HTMLDivElement>(null);
+  const reversedAlerts = useMemo(() => [...triggeredAlerts].reverse(), [triggeredAlerts]);
+
+  const rowVirtualizer = useVirtualizer({
+    count: reversedAlerts.length,
+    getScrollElement: () => parentRef.current,
+    estimateSize: () => 40,
+    overscan: 10,
+  });
   const [newAlert, setNewAlert] = useState({
     resourceType: "EC2",
     metric: "cpu",
@@ -202,26 +212,48 @@ export default function AlertsPanel({
               <span className={styles.historyCol}>Threshold</span>
               <span className={styles.historyCol}>Condition</span>
             </div>
-            <div className={styles.alertHistoryContainer}>
-              {[...triggeredAlerts].reverse().map((alert) => (
-                <div key={alert.id} className={styles.alertHistoryRow}>
-                  <span className={styles.historyCell}>{alert.timestamp}</span>
-                  <span className={styles.historyCell}>
-                    {alert.resourceId}
-                  </span>
-                  <span className={styles.historyCell}>
-                    {alert.resourceType}
-                  </span>
-                  <span className={styles.historyCell}>{alert.metric}</span>
-                  <span className={styles.historyCell}>{alert.value}</span>
-                  <span className={styles.historyCell}>{alert.threshold}</span>
-                  <span
-                    className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}
-                  >
-                    {alert.condition}
-                  </span>
-                </div>
-              ))}
+            <div className={styles.alertHistoryContainer} ref={parentRef} style={{ overflow: 'auto', height: '400px' }}>
+              <div
+                style={{
+                  height: `${rowVirtualizer.getTotalSize()}px`,
+                  width: '100%',
+                  position: 'relative',
+                }}
+              >
+                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
+                  const alert = reversedAlerts[virtualRow.index];
+                  return (
+                    <div 
+                      key={alert.id} 
+                      className={styles.alertHistoryRow}
+                      style={{
+                        position: 'absolute',
+                        top: 0,
+                        left: 0,
+                        width: '100%',
+                        height: `${virtualRow.size}px`,
+                        transform: `translateY(${virtualRow.start}px)`,
+                      }}
+                    >
+                      <span className={styles.historyCell}>{alert.timestamp}</span>
+                      <span className={styles.historyCell}>
+                        {alert.resourceId}
+                      </span>
+                      <span className={styles.historyCell}>
+                        {alert.resourceType}
+                      </span>
+                      <span className={styles.historyCell}>{alert.metric}</span>
+                      <span className={styles.historyCell}>{alert.value}</span>
+                      <span className={styles.historyCell}>{alert.threshold}</span>
+                      <span
+                        className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}
+                      >
+                        {alert.condition}
+                      </span>
+                    </div>
+                  );
+                })}
+              </div>
             </div>
           </>
         )}

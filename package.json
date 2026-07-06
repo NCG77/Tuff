@@ -13,6 +13,7 @@
   "dependencies": {
     "@firebase/app": "^0.14.12",
     "@next/bundle-analyzer": "^16.2.9",
+    "@tanstack/react-virtual": "^3.14.5",
     "firebase": "^12.13.0",
     "lucide-react": "^1.17.0",
     "next": "16.2.6",

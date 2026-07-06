@@ -34,13 +34,27 @@ class AWSEngine:
                     Period=86400, 
                     Statistics=['Average']
                 )
+                
+                net_in_stats = cw_client.get_metric_statistics(
+                    Namespace='AWS/EC2',
+                    MetricName='NetworkIn',
+                    Dimensions=[{'Name': 'InstanceId', 'Value': instance_id}],
+                    StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                    EndTime=datetime.now(timezone.utc),
+                    Period=86400,
+                    Statistics=['Average']
+                )
 
                 datapoints = metric_stats.get('Datapoints', [])
+                net_in_datapoints = net_in_stats.get('Datapoints', [])
                 if datapoints:
                     averages = [d['Average'] for d in datapoints]
                     max_avg_cpu = max(averages)
+                    
+                    net_in_avgs = [d['Average'] for d in net_in_datapoints] if net_in_datapoints else [0]
+                    max_net_in = max(net_in_avgs)
 
-                    if max_avg_cpu < 5.0 or instance_type=="t3.xlarge":
+                    if (max_avg_cpu < 5.0 and max_net_in < 1000) or instance_type=="t3.xlarge":
                         findings.append({
                             "resource_type": "EC2",
                             "resource_id": instance_id,
@@ -49,11 +63,12 @@ class AWSEngine:
                             "metrics": {
                                 "cpu_avg": round(sum(averages) / len(averages), 2),
                                 "max_cpu_observed": round(max_avg_cpu, 2),
+                                "network_in_bytes_sec": round(max_net_in, 2),
                                 "instance_type": instance_type
                             },
                             "region": self.region,
                             "estimated_monthly_cost": 120, 
-                            "recommendation": "Consider stopping or downsizing this instance to save costs."
+                            "recommendation": "Consider stopping or downsizing this instance to save costs. Memory usage should also be verified if CloudWatch Agent is installed."
                         })
         return findings
 
@@ -69,20 +84,28 @@ class AWSEngine:
             volume_id = volume['VolumeId']
             size_gb = volume['Size']
             volume_type = volume['VolumeType']
+            create_time = volume.get('CreateTime')
+            
+            is_old_enough = True
+            if create_time:
+                days_old = (datetime.now(timezone.utc) - create_time).days
+                if days_old < 7:
+                    is_old_enough = False
 
-            findings.append({
-                "resource_type": "EBS_Volume",
-                "resource_id": volume_id,
-                "issue": "Unattached Volume",
-                "severity": "high",
-                "metrics": {
-                    "size_gb": size_gb,
-                    "volume_type": volume_type
-                },
-                "region": self.region,
-                "estimated_monthly_cost": round(size_gb * 0.08, 2), 
-                "recommendation": "Snapshot data if needed, then delete this orphaned volume immediately."
-            })
+            if is_old_enough:
+                findings.append({
+                    "resource_type": "EBS_Volume",
+                    "resource_id": volume_id,
+                    "issue": "Unattached Volume",
+                    "severity": "high",
+                    "metrics": {
+                        "size_gb": size_gb,
+                        "volume_type": volume_type
+                    },
+                    "region": self.region,
+                    "estimated_monthly_cost": round(size_gb * 0.08, 2), 
+                    "recommendation": "Snapshot data if needed, then delete this orphaned volume immediately."
+                })
         return findings
 
     def scan_public_s3(self) -> list:
@@ -135,18 +158,24 @@ class AWSEngine:
         
         for v in vpcs:
             vpc_id = v['VpcId']
-            instances = ec2_client.describe_instances(
-                Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
-            )['Reservations']
             
-            if len(instances) == 0:
+            enis = ec2_client.describe_network_interfaces(
+                Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
+            )['NetworkInterfaces']
+            
+            nat_gateways = ec2_client.describe_nat_gateways(
+                Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}, {'Name': 'state', 'Values': ['available', 'pending']}]
+            )['NatGateways']
+            
+            if len(enis) == 0 and len(nat_gateways) == 0:
                 vpc_findings.append({
                     "resource_type": "VPC",
                     "resource_id": vpc_id,
                     "issue": "Unused VPC",
                     "severity": "medium",
                     "metrics": {
-                        "instance_count": 0,
+                        "eni_count": 0,
+                        "nat_gateway_count": 0,
                         "is_default": v.get('IsDefault', False)
                     },
                     "region": self.region,
@@ -157,6 +186,7 @@ class AWSEngine:
 
     def scan_rds(self) -> list:
         rds_client = self.session.client('rds')
+        cw_client = self.session.client('cloudwatch')
         databases = rds_client.describe_db_instances()['DBInstances']
         rds_findings = []
         
@@ -165,19 +195,34 @@ class AWSEngine:
             db_status = db['DBInstanceStatus']
             
             if db_status == 'available':
-                rds_findings.append({
-                    "resource_type": "RDS",
-                    "resource_id": db_id,
-                    "issue": "Idle Database Instance",
-                    "severity": "high",
-                    "metrics": {
-                        "engine": db['Engine'],
-                        "instance_class": db['DBInstanceClass']
-                    },
-                    "region": self.region, 
-                    "recommendation": "Snapshot and terminate this unutilized database workspace ledger tier.",
-                    "estimated_monthly_cost": 45 
-                })
+                metric_stats = cw_client.get_metric_statistics(
+                    Namespace='AWS/RDS',
+                    MetricName='DatabaseConnections',
+                    Dimensions=[{'Name': 'DBInstanceIdentifier', 'Value': db_id}],
+                    StartTime=datetime.now(timezone.utc) - timedelta(days=7),
+                    EndTime=datetime.now(timezone.utc),
+                    Period=86400,
+                    Statistics=['Maximum']
+                )
+                
+                datapoints = metric_stats.get('Datapoints', [])
+                max_connections = max([d['Maximum'] for d in datapoints]) if datapoints else 0
+                
+                if max_connections == 0:
+                    rds_findings.append({
+                        "resource_type": "RDS",
+                        "resource_id": db_id,
+                        "issue": "Idle Database Instance",
+                        "severity": "high",
+                        "metrics": {
+                            "engine": db['Engine'],
+                            "instance_class": db['DBInstanceClass'],
+                            "max_connections_7d": max_connections
+                        },
+                        "region": self.region, 
+                        "recommendation": "Snapshot and terminate this unutilized database workspace ledger tier.",
+                        "estimated_monthly_cost": 45 
+                    })
         return rds_findings
 
     def scan_scaling_candidates(self) -> list:
@@ -215,11 +260,12 @@ class AWSEngine:
                             "severity": "medium",
                             "metrics": {
                                 "average_cpu": round(avg_cpu, 2),
-                                "current_instance_type": current_type
+                                "current_instance_type": current_type,
+                                "suggested_type": "t3.micro"
                             },
                             "region": self.region,
                             "estimated_monthly_cost": 120, 
-                            "recommendation": f"Consider resizing this instance to a smaller type to optimize costs."
+                            "recommendation": f"Consider resizing this instance to a smaller type to optimize costs. WARNING: Manually verify Memory utilization before downsizing to prevent OOM errors."
                         })
         return findings
 
@@ -232,6 +278,7 @@ class AWSEngine:
         all_findings.extend(self.scan_public_s3())
         all_findings.extend(self.scan_vpc())
         all_findings.extend(self.scan_rds())
+        all_findings.extend(self.scan_scaling_candidates())
         return all_findings
 
 

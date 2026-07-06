@@ -137,46 +137,26 @@ export default function MainPage() {
     setTotalSavings(Number(savings.toFixed(2)));
   }, [findings, dismissed]);
   useEffect(() => {
-    const newTriggeredAlerts: any[] = [];
+    if (alertConfigs.length === 0 || findings.length === 0) {
+      setTriggeredAlerts([]);
+      return;
+    }
 
-    alertConfigs.forEach((config) => {
-      findings.forEach((finding) => {
-        if (!dismissed.has(finding.id)) {
-          const metric = parseFloat(finding[config.metric.toLowerCase()] || 0);
-          let triggered = false;
+    const worker = new Worker(
+      new URL("../../workers/alertWorker.ts", import.meta.url),
+    );
 
-          if (config.thresholdType === "below") {
-            triggered = metric < config.threshold;
-          } else if (config.thresholdType === "above") {
-            triggered = metric > config.threshold;
-          }
+    worker.onmessage = (event) => {
+      setTriggeredAlerts(event.data);
+    };
 
-          if (triggered && finding.type.includes(config.resourceType)) {
-            const alertId = `${config.id}-${finding.id}`;
-            const existingAlert = newTriggeredAlerts.find(
-              (a) => a.id === alertId,
-            );
-            if (!existingAlert) {
-              newTriggeredAlerts.push({
-                id: alertId,
-                configId: config.id,
-                resourceId: finding.id,
-                resourceType: finding.type,
-                metric: config.metric,
-                value: metric,
-                threshold: config.threshold,
-                condition: config.thresholdType,
-                timestamp: new Date().toLocaleString(),
-              });
-            }
-          }
-        }
-      });
+    worker.postMessage({
+      alertConfigs,
+      findings,
+      dismissedList: Array.from(dismissed),
     });
 
-    setTriggeredAlerts(newTriggeredAlerts);
-
-    if (alertConfigs.length > 0 && findings.length > 0 && user) {
+    if (user) {
       const evaluateAlertsBackend = async () => {
         try {
           const token = await user.getIdToken();
@@ -198,7 +178,11 @@ export default function MainPage() {
       };
       evaluateAlertsBackend();
     }
-  }, [findings, alertConfigs, dismissed]);
+
+    return () => {
+      worker.terminate();
+    };
+  }, [findings, alertConfigs, dismissed, user]);
 
   if (loading || !user) {
     return (
@@ -222,7 +206,7 @@ export default function MainPage() {
     setScanningResource(null);
   };
 
-  const handleApprove = async (id: string) => {
+  const handleApprove = async (id: string, actionTypeOverride?: string, targetTypeOverride?: string) => {
     const targetFinding = findings.find((f) => f.id === id);
     if (!targetFinding) return;
     if (!user) {
@@ -230,17 +214,19 @@ export default function MainPage() {
       return;
     }
 
-    let actionType = "stop_instance";
-    if (targetFinding.type.includes("Volume")) {
-      actionType = "delete_volume";
-    } else if (targetFinding.type.includes("S3")) {
-      actionType = "secure_s3";
-    } else if (targetFinding.type.includes("Scaling")) {
-      actionType = "scale_instance";
-    } else if (targetFinding.type.includes("RDS")) {
-      actionType = "stop_rds";
-    } else if (targetFinding.type.includes("VPC")) {
-      actionType = "delete_vpc";
+    let actionType = actionTypeOverride || "stop_instance";
+    if (!actionTypeOverride) {
+      if (targetFinding.type.includes("Volume")) {
+        actionType = "delete_volume";
+      } else if (targetFinding.type.includes("S3")) {
+        actionType = "secure_s3";
+      } else if (targetFinding.type.includes("Scaling")) {
+        actionType = "scale_instance";
+      } else if (targetFinding.type.includes("RDS")) {
+        actionType = "stop_rds";
+      } else if (targetFinding.type.includes("VPC")) {
+        actionType = "delete_vpc";
+      }
     }
 
     try {
@@ -267,7 +253,7 @@ export default function MainPage() {
               : targetFinding.region,
           resource_id: id,
           action_type: actionType,
-          target_type: targetFinding.metrics?.suggested_type || "t3.micro",
+          target_type: targetTypeOverride || targetFinding.metrics?.suggested_type || "t3.micro",
           user_id: user.email,
         }),
       });

@@ -23,7 +23,7 @@ interface FindingsPanelProps {
   selectedFinding: Finding | null;
   activeTab: "all" | "cost" | "security" | "logs" | "alerts";
   onSelectFinding: (finding: Finding | null) => void;
-  onApprove: (id: string) => void;
+  onApprove: (id: string, actionTypeOverride?: string, targetTypeOverride?: string) => void;
   onDismiss: (id: string, finding: Finding) => void;
   setActiveTab: (tab: "all" | "cost" | "security" | "logs" | "alerts") => void;
 }
@@ -127,6 +127,36 @@ export default function FindingsPanel({
                         ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
                         : "Approve"}
                     </button>
+                    {f.type.includes("EC2") && (
+                      <select
+                        onChange={(e) => {
+                          if (e.target.value) {
+                            onApprove(f.id, "scale_instance", e.target.value);
+                            e.target.value = "";
+                          }
+                        }}
+                        style={{
+                          background: "rgba(139, 115, 85, 0.1)",
+                          color: "#8b7355",
+                          border: "1px solid rgba(139, 115, 85, 0.3)",
+                          padding: "6px 10px",
+                          borderRadius: "4px",
+                          fontSize: "12px",
+                          fontWeight: 600,
+                          cursor: "pointer",
+                          outline: "none",
+                          fontFamily: "Jost, sans-serif",
+                          marginLeft: "8px"
+                        }}
+                      >
+                        <option value="">Auto Scale...</option>
+                        <option value="t3.nano">Scale to t3.nano</option>
+                        <option value="t3.micro">Scale to t3.micro</option>
+                        <option value="t3.medium">Scale to t3.medium</option>
+                        <option value="t3.large">Scale to t3.large</option>
+                        <option value="t3.xlarge">Scale to t3.xlarge</option>
+                      </select>
+                    )}
                     <button
                       className={styles.dismissBtn}
                       onClick={() => onDismiss(f.id, f)}
