@@ -620,31 +620,28 @@ async def generate_iam_policy():
     try:
         logger.info("Generating AI-powered IAM policy...")
         
-        prompt = """Generate a comprehensive AWS IAM policy JSON for a cloud optimization tool called TUFF that:
-        1. Scans EC2 instances, EBS volumes, RDS databases, S3 buckets, and VPCs
-        2. Can stop/start EC2 instances
-        3. Can delete unattached EBS volumes
-        4. Can delete RDS instances
-        5. Can secure S3 buckets with Public Access Block
-        6. Can delete VPCs
-        7. Can modify instance types
-        8. Can read CloudWatch metrics
-        9. Can configure AWS EventBridge rules, API Destinations, and SNS topics to send real-time deletion events to TUFF's webhook
+        prompt = """Generate a secure, least-privilege AWS IAM policy JSON for a cloud optimization tool called TUFF.
+        The tool requires the following capabilities:
+        1. Read: EC2 instances, EBS volumes, VPCs, ENIs, NAT Gateways, RDS instances, S3 buckets + public access block config, CloudWatch metrics.
+        2. Write/Remediate: Stop/start EC2 instances, delete unattached EBS volumes, delete idle RDS instances, enable S3 Public Access Block, delete unused VPCs, modify EC2 instance types.
+        3. EventBridge: Configure rules, API destinations, and SNS topics for webhook events.
+        
+        CRITICAL SECURITY REQUIREMENTS:
+        - Do NOT use wildcard Actions (e.g., ec2:*). List the exact required API actions.
+        - Do NOT use 'Resource: "*"' for destructive/write actions (DeleteVpc, DeleteVolume, etc.). Instead, structure the policy to require the user to replace placeholder ARNs (e.g., "arn:aws:ec2:REGION:ACCOUNT:vpc/vpc-EXACT-ID") or use condition keys to restrict the scope strictly to intended resources.
         
         Respond ONLY with valid JSON in this exact format:
         {
             "Version": "2012-10-17",
             "Statement": [
                 {
-                    "Sid": "EC2Operations",
+                    "Sid": "LeastPrivilegeRead",
                     "Effect": "Allow",
-                    "Action": ["action1", "action2"],
+                    "Action": ["..."],
                     "Resource": "*"
                 }
             ]
-        }
-        
-        Include all necessary actions for scanning and remediating cloud resources. Be comprehensive."""
+        }"""
         
         response = client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -679,28 +676,55 @@ async def generate_iam_policy():
             "Version": "2012-10-17",
             "Statement": [
                 {
-                    "Sid": "EC2FullAccess",
+                    "Sid": "TUFFReadOnlyAccess",
                     "Effect": "Allow",
-                    "Action": ["ec2:*"],
+                    "Action": [
+                        "ec2:DescribeInstances",
+                        "ec2:DescribeVolumes",
+                        "ec2:DescribeVpcs",
+                        "ec2:DescribeNetworkInterfaces",
+                        "ec2:DescribeNatGateways",
+                        "rds:DescribeDBInstances",
+                        "s3:ListAllMyBuckets",
+                        "s3:GetBucketPublicAccessBlock",
+                        "cloudwatch:GetMetricStatistics",
+                        "cloudwatch:ListMetrics"
+                    ],
                     "Resource": "*"
                 },
                 {
-                    "Sid": "RDSFullAccess",
+                    "Sid": "TUFFRemediationAccess",
                     "Effect": "Allow",
-                    "Action": ["rds:*"],
-                    "Resource": "*"
+                    "Action": [
+                        "ec2:StopInstances",
+                        "ec2:StartInstances",
+                        "ec2:DeleteVolume",
+                        "ec2:DeleteVpc",
+                        "ec2:ModifyInstanceAttribute",
+                        "rds:DeleteDBInstance",
+                        "s3:PutBucketPublicAccessBlock"
+                    ],
+                    "Resource": [
+                        "arn:aws:ec2:*:*:instance/*",
+                        "arn:aws:ec2:*:*:volume/*",
+                        "arn:aws:ec2:*:*:vpc/*",
+                        "arn:aws:rds:*:*:db:*",
+                        "arn:aws:s3:::*"
+                    ]
                 },
                 {
-                    "Sid": "S3FullAccess",
+                    "Sid": "TUFFEventBridgeAccess",
                     "Effect": "Allow",
-                    "Action": ["s3:*"],
-                    "Resource": "*"
-                },
-                {
-                    "Sid": "CloudWatchMetrics",
-                    "Effect": "Allow",
-                    "Action": ["cloudwatch:GetMetricStatistics", "cloudwatch:ListMetrics"],
-                    "Resource": "*"
+                    "Action": [
+                        "events:PutRule",
+                        "events:PutTargets",
+                        "sns:CreateTopic",
+                        "sns:Subscribe"
+                    ],
+                    "Resource": [
+                        "arn:aws:events:*:*:rule/*",
+                        "arn:aws:sns:*:*:*"
+                    ]
                 }
             ]
         }
