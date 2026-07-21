@@ -713,6 +713,7 @@ export default function MainPage() {
                 onApprove={handleApprove}
                 onDismiss={handleDismissWithHistory}
                 setActiveTab={setActiveTab}
+                onScanAgain={() => setCostTabScanned(false)}
               />
             )
           )}

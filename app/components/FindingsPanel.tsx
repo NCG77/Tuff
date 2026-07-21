@@ -1,3 +1,4 @@
+import { useState } from "react";
 import styles from "@/app/src/main_page/page.module.css";
 import TabFilters from "@/app/components/TabFilters";
 
@@ -26,6 +27,7 @@ interface FindingsPanelProps {
   onApprove: (id: string, actionTypeOverride?: string, targetTypeOverride?: string) => void;
   onDismiss: (id: string, finding: Finding) => void;
   setActiveTab: (tab: "all" | "cost" | "security" | "logs" | "alerts") => void;
+  onScanAgain?: () => void;
 }
 
 export default function FindingsPanel({
@@ -38,31 +40,82 @@ export default function FindingsPanel({
   onApprove,
   onDismiss,
   setActiveTab,
+  onScanAgain,
 }: FindingsPanelProps) {
+  const [regionFilter, setRegionFilter] = useState<string>("all");
+
   const filteredFindings = findings.filter((f) => {
     if (dismissed.has(f.id)) return false;
+    if (regionFilter !== "all" && f.region !== regionFilter && f.region !== "global") return false;
     if (activeTab === "cost")
-      return f.type.includes("EC2") || f.type.includes("Volume");
-    if (activeTab === "security") return f.type.includes("S3");
+      return f.type.includes("EC2") || f.type.includes("Volume") || f.type.includes("RDS") || f.type.includes("Scaling") || f.type.includes("VPC");
+    if (activeTab === "security") return f.type.includes("S3") || f.type.includes("IAM");
     return true;
   });
+
+  const availableRegions = Array.from(new Set(findings.map(f => f.region).filter(r => r !== "global")));
 
   const costCount = findings.filter(
     (f) =>
       !dismissed.has(f.id) &&
-      (f.type.includes("EC2") || f.type.includes("Volume"))
+      (f.type.includes("EC2") || f.type.includes("Volume") || f.type.includes("RDS") || f.type.includes("Scaling") || f.type.includes("VPC"))
   ).length;
 
   const securityCount = findings.filter(
-    (f) => !dismissed.has(f.id) && f.type.includes("S3")
+    (f) => !dismissed.has(f.id) && (f.type.includes("S3") || f.type.includes("IAM"))
   ).length;
 
   const allCount = findings.filter((f) => !dismissed.has(f.id)).length;
 
   return (
     <div className={`${styles.largeCard} ${styles.findingsCard}`}>
-      <div className={styles.cardHeader}>
-        <h3>Cloud Resources Requiring Action</h3>
+      <div className={styles.cardHeader} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+          <h3 style={{ margin: 0 }}>Cloud Resources Requiring Action</h3>
+          <div style={{ display: 'flex', gap: '12px', alignItems: 'center' }}>
+            {activeTab === "cost" && (
+              <select
+                value={regionFilter}
+                onChange={(e) => setRegionFilter(e.target.value)}
+                style={{
+                  background: "rgba(255, 255, 255, 0.95)",
+                  border: "1px solid #8b7355",
+                  padding: "6px 12px",
+                  color: "#000000",
+                  borderRadius: "4px",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  outline: "none",
+                  fontFamily: "Jost, sans-serif"
+                }}
+              >
+                <option value="all">All Regions</option>
+                {availableRegions.map(r => (
+                  <option key={r} value={r}>{r}</option>
+                ))}
+              </select>
+            )}
+            {activeTab === "cost" && onScanAgain && (
+              <button
+                onClick={onScanAgain}
+                style={{
+                  background: "#8b7355",
+                  color: "#ffffff",
+                  padding: "6px 12px",
+                  border: "none",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: "bold",
+                  textTransform: "uppercase",
+                  fontFamily: "Jost, sans-serif"
+                }}
+              >
+                Scan Again
+              </button>
+            )}
+          </div>
+        </div>
         <TabFilters
           activeTab={activeTab}
           setActiveTab={setActiveTab}

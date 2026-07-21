@@ -328,12 +328,30 @@ async def analyze_infrastructure(request: ScanRequest, current_user: dict = Depe
         
         logger.info(f"Initializing cloud audit for region: {request.region} (Scan ID: {scan_id}) [Verified Tier: {user_tier.upper()}]")
         
-        aws_engine = AWSEngine(
-            aws_access_key=request.aws_access_key,
-            aws_secret_key=request.aws_secret_key,
-            region_name=request.region
-        )
-        raw_findings = aws_engine.execute_full_scan()
+        raw_findings = []
+        if request.region.lower() == "all":
+            import boto3
+            temp_session = boto3.Session(
+                aws_access_key_id=request.aws_access_key,
+                aws_secret_access_key=request.aws_secret_key,
+                region_name="us-east-1"
+            )
+            ec2_client = temp_session.client('ec2')
+            regions = [region['RegionName'] for region in ec2_client.describe_regions()['Regions']]
+        else:
+            regions = [request.region]
+            
+        for reg in regions:
+            try:
+                aws_engine = AWSEngine(
+                    aws_access_key=request.aws_access_key,
+                    aws_secret_key=request.aws_secret_key,
+                    region_name=reg
+                )
+                raw_findings.extend(aws_engine.execute_full_scan())
+            except Exception as e:
+                logger.error(f"Failed to scan region {reg}: {str(e)}")
+                
         logger.info(f"Pipeline data ready. Processing {len(raw_findings)} items via AI analysis under '{user_tier}' quota...")
 
         ai_evaluated_queue = []

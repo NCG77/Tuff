@@ -265,6 +265,7 @@ export default function AwsConnectForm({
             borderRadius: "4px",
           }}
         >
+          <option value="all">All Regions</option>
           <option value="us-east-1">US East (N. Virginia)</option>
           <option value="us-west-2">US West (Oregon)</option>
           <option value="eu-west-1">Europe (Ireland)</option>
