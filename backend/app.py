@@ -646,7 +646,7 @@ async def generate_iam_policy():
         prompt = """Generate a secure, least-privilege AWS IAM policy JSON for a cloud optimization tool called TUFF.
         The tool requires the following capabilities:
         1. Read: EC2 instances, EBS volumes, VPCs, ENIs, NAT Gateways, RDS instances, S3 buckets + public access block config, CloudWatch metrics.
-        2. Write/Remediate: Stop/start EC2 instances, delete unattached EBS volumes, delete idle RDS instances, enable S3 Public Access Block, delete unused VPCs, modify EC2 instance types.
+        2. Write/Remediate: Stop/start/terminate EC2 instances, delete unattached EBS volumes, delete idle RDS instances, enable S3 Public Access Block, delete unused VPCs, modify EC2 instance types.
         3. EventBridge: Configure rules, API destinations, and SNS topics for webhook events.
         
         CRITICAL SECURITY REQUIREMENTS:
@@ -721,6 +721,7 @@ async def generate_iam_policy():
                     "Action": [
                         "ec2:StopInstances",
                         "ec2:StartInstances",
+                        "ec2:TerminateInstances",
                         "ec2:DeleteVolume",
                         "ec2:DeleteVpc",
                         "ec2:ModifyInstanceAttribute",
