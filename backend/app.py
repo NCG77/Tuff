@@ -651,7 +651,7 @@ async def generate_iam_policy():
         
         CRITICAL SECURITY REQUIREMENTS:
         - Do NOT use wildcard Actions (e.g., ec2:*). List the exact required API actions.
-        - Do NOT use 'Resource: "*"' for destructive/write actions (DeleteVpc, DeleteVolume, etc.). Instead, structure the policy to require the user to replace placeholder ARNs (e.g., "arn:aws:ec2:REGION:ACCOUNT:vpc/vpc-EXACT-ID") or use condition keys to restrict the scope strictly to intended resources.
+        - Do NOT use 'Resource: "*"' for destructive/write actions (DeleteVpc, DeleteVolume, etc.). Instead, use resource-specific wildcard ARNs like "arn:aws:ec2:*:*:instance/*", "arn:aws:ec2:*:*:volume/*", "arn:aws:rds:*:*:db:*", etc. to restrict the scope strictly to intended resource types without requiring manual ID replacement.
         
         Respond ONLY with valid JSON in this exact format:
         {
