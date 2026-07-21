@@ -70,12 +70,13 @@ export default function AwsConnectForm({
       });
 
       if (response.ok) {
+        const result = await response.json();
         localStorage.setItem(
           "aws_credentials",
           JSON.stringify({ accessKey, secretKey, region }),
         );
         setSuccess("AWS credentials saved successfully!");
-        onScanComplete([], { keyId: accessKey, secretKey: secretKey });
+        onScanComplete(result.data || [], { keyId: accessKey, secretKey: secretKey });
         setTimeout(() => setSuccess(""), 3000);
       } else {
         const result = await response.json();

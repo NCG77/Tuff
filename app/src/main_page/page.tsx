@@ -199,6 +199,7 @@ export default function MainPage() {
     setFindings(liveData);
     if (credentials) setActiveCredentials(credentials);
     if (liveData.length > 0) setSelectedFinding(liveData[0]);
+    setCostTabScanned(true);
   };
 
   const handleScanError = (errorMsg: string) => {
@@ -310,20 +311,20 @@ export default function MainPage() {
     }
   };
 
-  const handleScanResourceType = async (resourceType: string) => {
+  const handleScanResourceType = async (resourceType: string, regionOverride?: string) => {
     setScanningResource(resourceType);
     setError(null);
 
     let keyId = activeCredentials?.keyId;
     let secretKey = activeCredentials?.secretKey;
-    let targetRegion = "";
+    let targetRegion = regionOverride || "";
     const saved = localStorage.getItem("aws_credentials");
     if (saved) {
       try {
         const parsed = JSON.parse(saved);
         keyId = keyId || parsed.accessKey;
         secretKey = secretKey || parsed.secretKey;
-        targetRegion = parsed.region;
+        if (!targetRegion) targetRegion = parsed.region;
       } catch (e) {
         console.error("Failed to parse saved credentials:", e);
       }
