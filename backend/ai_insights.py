@@ -136,7 +136,8 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
     if response:
         if user_record.credits > 0:
             user_record.credits -= 100  # token usage approximation
-            db.commit()
+            # Removed db.commit() to prevent SQLAlchemy concurrent transaction errors across threads.
+            # The session commit is handled gracefully in the parent endpoint.
 
         return json.loads(response.choices[0].message.content)
     else:
