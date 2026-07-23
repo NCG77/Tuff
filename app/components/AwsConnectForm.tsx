@@ -116,6 +116,10 @@ export default function AwsConnectForm({
       const result = await response.json();
 
       if (response.ok && result.status === "success") {
+        localStorage.setItem(
+          "aws_credentials",
+          JSON.stringify({ accessKey, secretKey, region }),
+        );
         onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
       } else {
         if (response.status === 429 && props.onTokenLimit) {

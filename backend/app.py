@@ -651,7 +651,7 @@ async def generate_iam_policy():
         
         CRITICAL SECURITY REQUIREMENTS:
         - Do NOT use wildcard Actions (e.g., ec2:*). List the exact required API actions.
-        - Do NOT use 'Resource: "*"' for destructive/write actions (DeleteVpc, DeleteVolume, etc.). Instead, use resource-specific wildcard ARNs like "arn:aws:ec2:*:*:instance/*", "arn:aws:ec2:*:*:volume/*", "arn:aws:rds:*:*:db:*", etc. to restrict the scope strictly to intended resource types without requiring manual ID replacement.
+        - You may use 'Resource: "*"' for the actions to ensure they succeed across varying AWS environments without ARN mismatches.
         
         Respond ONLY with valid JSON in this exact format:
         {
@@ -728,13 +728,7 @@ async def generate_iam_policy():
                         "rds:DeleteDBInstance",
                         "s3:PutBucketPublicAccessBlock"
                     ],
-                    "Resource": [
-                        "arn:aws:ec2:*:*:instance/*",
-                        "arn:aws:ec2:*:*:volume/*",
-                        "arn:aws:ec2:*:*:vpc/*",
-                        "arn:aws:rds:*:*:db:*",
-                        "arn:aws:s3:::*"
-                    ]
+                    "Resource": "*"
                 },
                 {
                     "Sid": "TUFFEventBridgeAccess",

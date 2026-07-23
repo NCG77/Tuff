@@ -221,6 +221,7 @@ export default function MainPage() {
     if (credentials) setActiveCredentials(credentials);
     if (liveData.length > 0) setSelectedFinding(liveData[0]);
     setCostTabScanned(true);
+    setShowAwsForm(false);
   };
 
   const handleScanError = (errorMsg: string) => {
