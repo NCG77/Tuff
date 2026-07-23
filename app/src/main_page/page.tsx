@@ -567,7 +567,9 @@ export default function MainPage() {
                 );
                 setShowAwsForm(true);
               } else {
-                setShowAwsForm(true);
+                setActiveTab("cost");
+                setCostTabScanned(false);
+                handleScanResourceType("all");
               }
             }}
           >

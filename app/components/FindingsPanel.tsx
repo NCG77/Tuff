@@ -145,88 +145,108 @@ export default function FindingsPanel({
             No alerts matched filter profile.
           </div>
         ) : (
-          filteredFindings.map((f) => (
-            <div
-              key={f.id}
-              className={styles.findingRow}
-              onClick={() => onSelectFinding(f)}
-            >
-              <div className={styles.findingIdWrapper}>
-                <div className={styles.findingId}>{f.id}</div>
-                <div className={styles.findingInst}>{f.inst}</div>
-              </div>
-              <div>
-                <span className={styles.badge}>{f.type}</span>
-              </div>
-              <div className={styles.findingRegion}>{f.region}</div>
-              <div className={styles.findingCost}>{f.cur}</div>
-              <div className={styles.findingSave}>{f.save}</div>
-              <div className={styles.findingCpu}>{f.cpu}</div>
-              <div
-                className={styles.actionButtons}
-                onClick={(e) => e.stopPropagation()}
-              >
-                {approved.has(f.id) ? (
-                  <span className={styles.executingStatus}>
-                    ⚙ EXECUTING...
-                  </span>
-                ) : (
-                  <>
-                    <button
-                      className={styles.approveBtn}
-                      onClick={() => onApprove(f.id)}
-                    >
-                      {f.type.includes("Scaling")
-                        ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
-                        : "Approve"}
-                    </button>
-                    {f.type.includes("EC2") && (
-                      <select
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          if (val) {
-                            if (val === "delete") {
-                              if (window.confirm("Warning: Are you sure you want to delete this instance? This action cannot be undone.")) {
-                                onApprove(f.id, "delete_instance");
-                              }
-                            } else {
-                              onApprove(f.id, "scale_instance", val);
-                            }
-                            e.target.value = "";
-                          }
-                        }}
-                        style={{
-                          background: "rgba(139, 115, 85, 0.1)",
-                          color: "#8b7355",
-                          border: "1px solid rgba(139, 115, 85, 0.3)",
-                          padding: "6px 10px",
-                          borderRadius: "4px",
-                          fontSize: "12px",
-                          fontWeight: 600,
-                          cursor: "pointer",
-                          outline: "none",
-                          fontFamily: "Jost, sans-serif",
-                          marginLeft: "8px"
-                        }}
-                      >
-                        <option value="">Auto Scale...</option>
-                        <option value="t3.nano">Scale to t3.nano</option>
-                        <option value="t3.micro">Scale to t3.micro</option>
-                        <option value="t3.medium">Scale to t3.medium</option>
-                        <option value="t3.large">Scale to t3.large</option>
-                        <option value="t3.xlarge">Scale to t3.xlarge</option>
-                        <option value="delete">Delete</option>
-                      </select>
+          Object.entries(
+            filteredFindings.reduce((acc, finding) => {
+              if (!acc[finding.id]) {
+                acc[finding.id] = [];
+              }
+              acc[finding.id].push(finding);
+              return acc;
+            }, {} as Record<string, Finding[]>)
+          ).map(([id, group]) => (
+            <div key={id} className={styles.findingGroupBlock}>
+              {group.map((f, index) => (
+                <div
+                  key={`${f.id}-${index}`}
+                  className={styles.findingRow}
+                  onClick={() => onSelectFinding(f)}
+                >
+                  <div className={styles.findingIdWrapper}>
+                    {index === 0 && (
+                      <>
+                        <div className={styles.findingId}>{f.id}</div>
+                        <div className={styles.findingInst}>{f.inst}</div>
+                      </>
                     )}
-                    <button
-                      className={styles.dismissBtn}
-                      onClick={() => onDismiss(f.id, f)}
-                    >
-                      ✕
-                    </button>
-                  </>
-                )}
-              </div>
+                  </div>
+                  <div>
+                    <span className={styles.badge}>{f.type}</span>
+                  </div>
+                  <div className={styles.findingRegion}>{f.region}</div>
+                  <div className={styles.findingCost}>{f.cur}</div>
+                  <div className={styles.findingSave}>{f.save}</div>
+                  <div className={styles.findingCpu}>{f.cpu}</div>
+                  <div
+                    className={styles.actionButtons}
+                    onClick={(e) => e.stopPropagation()}
+                  >
+                    {approved.has(f.id) ? (
+                      <span className={styles.executingStatus}>
+                        ⚙ EXECUTING...
+                      </span>
+                    ) : (
+                      <>
+                        <button
+                          className={styles.approveBtn}
+                          onClick={() => onApprove(f.id)}
+                        >
+                          {f.type.includes("Scaling")
+                            ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
+                            : "Approve"}
+                        </button>
+                        {f.type.includes("EC2") && (
+                          <select
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              if (val) {
+                                if (val === "delete") {
+                                  if (
+                                    window.confirm(
+                                      "Warning: Are you sure you want to delete this instance? This action cannot be undone."
+                                    )
+                                  ) {
+                                    onApprove(f.id, "delete_instance");
+                                  }
+                                } else {
+                                  onApprove(f.id, "scale_instance", val);
+                                }
+                                e.target.value = "";
+                              }
+                            }}
+                            style={{
+                              background: "rgba(139, 115, 85, 0.1)",
+                              color: "#8b7355",
+                              border: "1px solid rgba(139, 115, 85, 0.3)",
+                              padding: "6px 10px",
+                              borderRadius: "4px",
+                              fontSize: "12px",
+                              fontWeight: 600,
+                              cursor: "pointer",
+                              outline: "none",
+                              fontFamily: "Jost, sans-serif",
+                              marginLeft: "8px",
+                            }}
+                          >
+                            <option value="">Auto Scale...</option>
+                            <option value="t3.nano">Scale to t3.nano</option>
+                            <option value="t3.micro">Scale to t3.micro</option>
+                            <option value="t3.medium">Scale to t3.medium</option>
+                            <option value="t3.large">Scale to t3.large</option>
+                            <option value="t3.xlarge">Scale to t3.xlarge</option>
+                            <option value="delete">Delete</option>
+                          </select>
+                        )}
+                        <button
+                          className={styles.dismissBtn}
+                          onClick={() => onDismiss(f.id, f)}
+                        >
+                          ✕
+                        </button>
+                      </>
+                    )}
+                  </div>
+                </div>
+              ))}
             </div>
           ))
         )}

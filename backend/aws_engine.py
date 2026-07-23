@@ -278,14 +278,7 @@ class AWSEngine:
         all_findings.extend(self.scan_public_s3())
         all_findings.extend(self.scan_vpc())
         all_findings.extend(self.scan_rds())
-        
-        existing_ec2 = {f["resource_id"]: f for f in all_findings if f.get("resource_type") == "EC2"}
-        for f in self.scan_scaling_candidates():
-            if f["resource_id"] in existing_ec2:
-                existing_ec2[f["resource_id"]]["issue"] += " & Scaling Candidate"
-            else:
-                all_findings.append(f)
-                
+        all_findings.extend(self.scan_scaling_candidates())
         return all_findings
 
 
