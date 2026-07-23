@@ -66,6 +66,14 @@ export default function MainPage() {
   }, [user, loading, router]);
 
   useEffect(() => {
+    if (typeof window !== "undefined" && "Notification" in window) {
+      if (Notification.permission !== "granted" && Notification.permission !== "denied") {
+        Notification.requestPermission();
+      }
+    }
+  }, []);
+
+  useEffect(() => {
     const loadUserData = async () => {
       if (!user) return;
 
@@ -147,7 +155,20 @@ export default function MainPage() {
     );
 
     worker.onmessage = (event) => {
-      setTriggeredAlerts(event.data);
+      setTriggeredAlerts((prevAlerts) => {
+        const newAlerts = event.data;
+        newAlerts.forEach((alert: any) => {
+          if (!prevAlerts.find((pa: any) => pa.id === alert.id)) {
+            if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+              new Notification("Tuff Alert Triggered", {
+                body: `Resource ${alert.resourceId} (${alert.resourceType}) triggered ${alert.metric} alert!`,
+                icon: "/favicon.ico"
+              });
+            }
+          }
+        });
+        return newAlerts;
+      });
     };
 
     worker.postMessage({

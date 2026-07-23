@@ -21,7 +21,7 @@ export default function TabFilters({
         display: "flex",
         gap: "12px",
         marginBottom: "24px",
-        borderBottom: "1px solid rgba(237,224,206,0.08)",
+        borderBottom: "1px solid rgba(139, 115, 85, 0.2)",
         paddingBottom: "12px",
       }}
     >
@@ -29,9 +29,9 @@ export default function TabFilters({
         onClick={() => setActiveTab("all")}
         style={{
           background:
-            activeTab === "all" ? "rgba(237,224,206,0.08)" : "transparent",
+            activeTab === "all" ? "rgba(139, 115, 85, 0.15)" : "transparent",
           border: "none",
-          color: "#fff",
+          color: activeTab === "all" ? "#4a3b2c" : "rgba(139, 115, 85, 0.7)",
           padding: "6px 12px",
           fontSize: "11px",
           textTransform: "uppercase",
@@ -46,9 +46,9 @@ export default function TabFilters({
         onClick={() => setActiveTab("cost")}
         style={{
           background:
-            activeTab === "cost" ? "rgba(237,224,206,0.08)" : "transparent",
+            activeTab === "cost" ? "rgba(139, 115, 85, 0.15)" : "transparent",
           border: "none",
-          color: activeTab === "cost" ? "#8cb982" : "rgba(237,224,206,0.6)",
+          color: activeTab === "cost" ? "#2d5a22" : "rgba(139, 115, 85, 0.7)",
           padding: "6px 12px",
           fontSize: "11px",
           textTransform: "uppercase",
@@ -63,12 +63,12 @@ export default function TabFilters({
         onClick={() => setActiveTab("security")}
         style={{
           background:
-            activeTab === "security" ? "rgba(237,224,206,0.08)" : "transparent",
+            activeTab === "security" ? "rgba(139, 115, 85, 0.15)" : "transparent",
           border: "none",
           color:
             activeTab === "security"
-              ? "rgba(220,90,70,1)"
-              : "rgba(237,224,206,0.6)",
+              ? "#a12c23"
+              : "rgba(139, 115, 85, 0.7)",
           padding: "6px 12px",
           fontSize: "11px",
           textTransform: "uppercase",
