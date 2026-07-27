@@ -252,7 +252,7 @@ class AWSEngine:
                 if datapoints:
                     averages = [d['Average'] for d in datapoints]
                     avg_cpu = sum(averages) / len(averages)
-                    if avg_cpu < 10.0 and not current_type.startswith('nano' or 'micro'):
+                    if avg_cpu < 10.0 and 'nano' not in current_type and 'micro' not in current_type:
                         findings.append({
                             "resource_type": "EC2",
                             "resource_id": instance_id,
