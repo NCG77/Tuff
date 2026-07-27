@@ -43,6 +43,7 @@ export default function FindingsPanel({
   onScanAgain,
 }: FindingsPanelProps) {
   const [regionFilter, setRegionFilter] = useState<string>("all");
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
 
   const filteredFindings = findings.filter((f) => {
     if (dismissed.has(f.id)) return false;
@@ -200,13 +201,7 @@ export default function FindingsPanel({
                               const val = e.target.value;
                               if (val) {
                                 if (val === "delete") {
-                                  if (
-                                    window.confirm(
-                                      "Warning: Are you sure you want to delete this instance? This action cannot be undone."
-                                    )
-                                  ) {
-                                    onApprove(f.id, "delete_instance");
-                                  }
+                                  setConfirmDeleteId(f.id);
                                 } else {
                                   onApprove(f.id, "scale_instance", val);
                                 }
@@ -375,6 +370,55 @@ export default function FindingsPanel({
                   </button>
                 </>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Custom Delete Confirmation Modal */}
+      {confirmDeleteId && (
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
+          backgroundColor: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          zIndex: 9999
+        }} onClick={() => setConfirmDeleteId(null)}>
+          <div onClick={(e) => e.stopPropagation()} style={{
+            background: "#1e1e1e", border: "1px solid rgba(255,100,100,0.3)",
+            borderRadius: "12px", padding: "32px", maxWidth: "420px",
+            textAlign: "center", boxShadow: "0 20px 40px rgba(0,0,0,0.6)",
+            display: "flex", flexDirection: "column", gap: "16px"
+          }}>
+            <h3 style={{ color: "#ff6b6b", margin: 0, fontSize: "1.4rem", fontWeight: 700 }}>Confirm Deletion</h3>
+            <p style={{ color: "#a0a0a0", margin: 0, fontSize: "1rem", lineHeight: "1.6" }}>
+              Are you absolutely sure you want to terminate this instance? This action is irreversible and all local data will be permanently destroyed.
+            </p>
+            <div style={{ display: "flex", gap: "16px", justifyContent: "center", marginTop: "16px" }}>
+              <button
+                onClick={() => setConfirmDeleteId(null)}
+                style={{
+                  padding: "10px 20px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
+                  color: "#eee", borderRadius: "6px", cursor: "pointer", fontWeight: 600, transition: "background 0.2s"
+                }}
+                onMouseOver={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.1)"}
+                onMouseOut={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.05)"}
+              >
+                Cancel
+              </button>
+              <button
+                onClick={() => {
+                  onApprove(confirmDeleteId, "delete_instance");
+                  setConfirmDeleteId(null);
+                }}
+                style={{
+                  padding: "10px 20px", background: "#d32f2f", border: "none",
+                  color: "#fff", borderRadius: "6px", cursor: "pointer", fontWeight: 600, transition: "background 0.2s"
+                }}
+                onMouseOver={(e) => e.currentTarget.style.background = "#b71c1c"}
+                onMouseOut={(e) => e.currentTarget.style.background = "#d32f2f"}
+              >
+                Yes, Terminate
+              </button>
             </div>
           </div>
         </div>

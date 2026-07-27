@@ -637,122 +637,87 @@ async def get_execution_logs(limit: int = 50, current_user: dict = Depends(get_c
 
 @app.post("/api/generate-iam-policy")
 async def generate_iam_policy():
-    from ai_insights import client
-    import json
-    
-    try:
-        logger.info("Generating AI-powered IAM policy...")
-        
-        prompt = """Generate a secure, least-privilege AWS IAM policy JSON for a cloud optimization tool called TUFF.
-        The tool requires the following capabilities:
-        1. Read: EC2 instances, EBS volumes, VPCs, ENIs, NAT Gateways, RDS instances, S3 buckets + public access block config, CloudWatch metrics.
-        2. Write/Remediate: Stop/start/terminate EC2 instances, delete unattached EBS volumes, delete idle RDS instances, enable S3 Public Access Block, delete unused VPCs, modify EC2 instance types.
-        3. EventBridge: Configure rules, API destinations, and SNS topics for webhook events.
-        
-        CRITICAL SECURITY REQUIREMENTS:
-        - Do NOT use wildcard Actions (e.g., ec2:*). List the exact required API actions.
-        - You may use 'Resource: "*"' for the actions to ensure they succeed across varying AWS environments without ARN mismatches.
-        
-        Respond ONLY with valid JSON in this exact format:
-        {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "LeastPrivilegeRead",
-                    "Effect": "Allow",
-                    "Action": ["..."],
-                    "Resource": "*"
-                }
-            ]
-        }"""
-        
-        response = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {
-                    "role": "system",
-                    "content": "You are an AWS IAM security expert. You must respond exclusively with valid JSON policy documents. Only output JSON, nothing else."
-                },
-                {
-                    "role": "user",
-                    "content": prompt
-                }
-            ],
-            response_format={"type": "json_object"},
-            temperature=0.1
-        )
-        
-        response_text = response.choices[0].message.content
-        policy = json.loads(response_text)
-        
-        logger.info("IAM policy generated successfully")
-        return JSONResponse(content={
-            "status": "success",
-            "policy": policy,
-            "timestamp": format_datetime(datetime.utcnow()),
-            "description": "Minimum required IAM permissions for TUFF operations"
-        })
-        
-    except Exception as e:
-        logger.error(f"Failed to generate IAM policy: {str(e)}")
-        fallback_policy = {
-            "Version": "2012-10-17",
-            "Statement": [
-                {
-                    "Sid": "TUFFReadOnlyAccess",
-                    "Effect": "Allow",
-                    "Action": [
-                        "ec2:DescribeInstances",
-                        "ec2:DescribeVolumes",
-                        "ec2:DescribeVpcs",
-                        "ec2:DescribeNetworkInterfaces",
-                        "ec2:DescribeNatGateways",
-                        "rds:DescribeDBInstances",
-                        "s3:ListAllMyBuckets",
-                        "s3:GetBucketPublicAccessBlock",
-                        "cloudwatch:GetMetricStatistics",
-                        "cloudwatch:ListMetrics"
-                    ],
-                    "Resource": "*"
-                },
-                {
-                    "Sid": "TUFFRemediationAccess",
-                    "Effect": "Allow",
-                    "Action": [
-                        "ec2:StopInstances",
-                        "ec2:StartInstances",
-                        "ec2:TerminateInstances",
-                        "ec2:DeleteVolume",
-                        "ec2:DeleteVpc",
-                        "ec2:ModifyInstanceAttribute",
-                        "rds:DeleteDBInstance",
-                        "s3:PutBucketPublicAccessBlock"
-                    ],
-                    "Resource": "*"
-                },
-                {
-                    "Sid": "TUFFEventBridgeAccess",
-                    "Effect": "Allow",
-                    "Action": [
-                        "events:PutRule",
-                        "events:PutTargets",
-                        "sns:CreateTopic",
-                        "sns:Subscribe"
-                    ],
-                    "Resource": [
-                        "arn:aws:events:*:*:rule/*",
-                        "arn:aws:sns:*:*:*"
-                    ]
-                }
-            ]
-        }
-        return JSONResponse(content={
-            "status": "success",
-            "policy": fallback_policy,
-            "timestamp": format_datetime(datetime.utcnow()),
-            "description": "Fallback IAM permissions for TUFF operations",
-            "note": "Full permissions recommended. Customize as needed based on your security requirements."
-        })
+    logger.info("Serving static IAM policy...")
+    static_policy = {
+        "Version": "2012-10-17",
+        "Statement": [
+            {
+                "Sid": "TUFFReadOnlyAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "ec2:DescribeInstances",
+                    "ec2:DescribeVolumes",
+                    "ec2:DescribeVpcs",
+                    "ec2:DescribeNetworkInterfaces",
+                    "ec2:DescribeNatGateways",
+                    "rds:DescribeDBInstances",
+                    "s3:ListAllMyBuckets",
+                    "s3:GetBucketPublicAccessBlock",
+                    "cloudwatch:GetMetricStatistics",
+                    "cloudwatch:ListMetrics",
+                    "autoscaling:DescribeAutoScalingGroups",
+                    "autoscaling:DescribeAutoScalingInstances"
+                ],
+                "Resource": "*"
+            },
+            {
+                "Sid": "TUFFRemediationAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "ec2:StopInstances",
+                    "ec2:StartInstances",
+                    "ec2:TerminateInstances",
+                    "ec2:DeleteVolume",
+                    "ec2:DeleteVpc",
+                    "ec2:ModifyInstanceAttribute",
+                    "rds:DeleteDBInstance",
+                    "s3:PutBucketPublicAccessBlock"
+                ],
+                "Resource": [
+                    "arn:aws:ec2:*:*:instance/*",
+                    "arn:aws:ec2:*:*:volume/*",
+                    "arn:aws:ec2:*:*:vpc/*",
+                    "arn:aws:rds:*:*:db:*",
+                    "arn:aws:s3:::*"
+                ]
+            },
+            {
+                "Sid": "TUFFAutoScalingRemediationAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "autoscaling:SetDesiredCapacity",
+                    "autoscaling:TerminateInstanceInAutoScalingGroup",
+                    "autoscaling:UpdateAutoScalingGroup",
+                    "autoscaling:SuspendProcesses",
+                    "autoscaling:ResumeProcesses"
+                ],
+                "Resource": [
+                    "arn:aws:autoscaling:*:*:autoScalingGroup:*:autoScalingGroupName/*"
+                ]
+            },
+            {
+                "Sid": "TUFFEventBridgeAccess",
+                "Effect": "Allow",
+                "Action": [
+                    "events:PutRule",
+                    "events:PutTargets",
+                    "sns:CreateTopic",
+                    "sns:Subscribe"
+                ],
+                "Resource": [
+                    "arn:aws:events:*:*:rule/*",
+                    "arn:aws:sns:*:*:*"
+                ]
+            }
+        ]
+    }
+    return JSONResponse(content={
+        "status": "success",
+        "policy": static_policy,
+        "timestamp": format_datetime(datetime.utcnow()),
+        "description": "Static IAM permissions for TUFF operations",
+        "note": "This policy is generated statically to ensure stability and reliability."
+    })
 
 @app.post("/api/alerts/config")
 async def create_alert_config(request: AlertConfigRequest, current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
