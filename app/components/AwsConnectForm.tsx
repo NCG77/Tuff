@@ -36,7 +36,6 @@ export default function AwsConnectForm({
         setAccessKey(key);
         setSecretKey(secret);
         setRegion(reg);
-        onScanComplete([], { keyId: key, secretKey: secret });
       } catch (err) {}
     }
   }, []);
