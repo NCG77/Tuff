@@ -5,7 +5,7 @@ import logging
 import uvicorn
 import os
 from dotenv import load_dotenv
-from ai_insights import explain_finding
+from ai_insights import explain_finding, humanize_insight
 from aws_engine import AWSEngine
 from pydantic import BaseModel
 from datetime import datetime
@@ -794,6 +794,24 @@ async def delete_alert_config(config_id: str, current_user: dict = Depends(get_c
         return JSONResponse(content={"status": "success", "message": f"Alert config {config_id} deleted"})
     except Exception as e:
         logger.error(f"❌ Failed to delete alert config: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+class HumanizeRequest(BaseModel):
+    explanation: str
+    business_impact: str
+    recommended_action: str
+
+@app.post("/api/humanize")
+async def humanize(request: HumanizeRequest, current_user: dict = Depends(get_current_user)):
+    try:
+        humanized_text = humanize_insight(
+            request.explanation,
+            request.business_impact,
+            request.recommended_action
+        )
+        return JSONResponse(content={"status": "success", "humanized_text": humanized_text})
+    except Exception as e:
+        logger.error(f"❌ Failed to humanize insight: {str(e)}")
         raise HTTPException(status_code=500, detail=str(e))
 
 class ActionLogRequest(BaseModel):

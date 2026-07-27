@@ -142,3 +142,58 @@ def explain_finding(finding: dict, user_record: UserSubscription, db: Session, i
         return json.loads(response.choices[0].message.content)
     else:
         raise RuntimeError("ERROR_INTERNAL_PARSING: No response generated from AI providers.")
+
+def humanize_insight(explanation: str, business_impact: str, recommended_action: str) -> str:
+    """
+    Takes technical insights and converts them into simple plain English.
+    """
+    model_name = "openrouter/auto"
+    
+    prompt = f"""Rewrite the following cloud infrastructure finding into a very simple, humanized, plain English explanation. Avoid technical jargon. Explain why the suggested changes are good for a non-technical person.
+    
+    Explanation: {explanation}
+    Business Impact: {business_impact}
+    Recommended Action: {recommended_action}
+    
+    Respond with ONLY the simple explanation paragraph. No JSON, no markdown formatting, just plain text.
+    """
+
+    try:
+        response = client.chat.completions.create(
+            model=model_name,
+            messages=[
+                {
+                    "role": "system",
+                    "content": "You are a helpful assistant who explains technical cloud concepts to non-technical users in simple plain English."
+                },
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            temperature=0.7
+        )
+        return response.choices[0].message.content.strip()
+    except openai.APIStatusError as e:
+        if e.status_code in (402, 403):
+            try:
+                response = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {
+                            "role": "system",
+                            "content": "You are a helpful assistant who explains technical cloud concepts to non-technical users in simple plain English."
+                        },
+                        {
+                            "role": "user",
+                            "content": prompt
+                        }
+                    ],
+                    temperature=0.7
+                )
+                return response.choices[0].message.content.strip()
+            except Exception:
+                return "Failed to humanize the insight due to an AI provider error."
+        return "Failed to humanize the insight due to an AI provider error."
+    except Exception:
+        return "Failed to humanize the insight due to an internal error."

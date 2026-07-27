@@ -1,6 +1,8 @@
 import { useState } from "react";
 import styles from "@/app/src/main_page/page.module.css";
 import TabFilters from "@/app/components/TabFilters";
+import { useAuth } from "@/app/context/AuthContext";
+import { api } from "@/app/lib/config";
 
 interface Finding {
   id: string;
@@ -42,8 +44,46 @@ export default function FindingsPanel({
   setActiveTab,
   onScanAgain,
 }: FindingsPanelProps) {
+  const { user } = useAuth();
   const [regionFilter, setRegionFilter] = useState<string>("all");
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [humanizedText, setHumanizedText] = useState<string | null>(null);
+  const [isHumanizing, setIsHumanizing] = useState(false);
+
+  const handleSelectFinding = (finding: Finding | null) => {
+    setHumanizedText(null);
+    onSelectFinding(finding);
+  };
+
+  const handleHumanize = async () => {
+    if (!selectedFinding || !user) return;
+    setIsHumanizing(true);
+    try {
+      const token = await user.getIdToken();
+      const res = await fetch(`${api.baseURL}/api/humanize`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          explanation: selectedFinding.explanation || "",
+          business_impact: selectedFinding.business_impact || "",
+          recommended_action: selectedFinding.recommended_action || ""
+        })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setHumanizedText(data.humanized_text);
+      } else {
+        setHumanizedText("Failed to humanize the finding.");
+      }
+    } catch (e) {
+      setHumanizedText("An error occurred while humanizing.");
+    } finally {
+      setIsHumanizing(false);
+    }
+  };
 
   const filteredFindings = findings.filter((f) => {
     if (dismissed.has(f.id)) return false;
@@ -160,7 +200,7 @@ export default function FindingsPanel({
                 <div
                   key={`${f.id}-${index}`}
                   className={styles.findingRow}
-                  onClick={() => onSelectFinding(f)}
+                  onClick={() => handleSelectFinding(f)}
                 >
                   <div className={styles.findingIdWrapper}>
                     {index === 0 && (
@@ -256,7 +296,7 @@ export default function FindingsPanel({
             </div>
             <button
               className={styles.closeBtn}
-              onClick={() => onSelectFinding(null)}
+              onClick={() => handleSelectFinding(null)}
               aria-label="Close detail panel"
             >
               ✕
@@ -319,7 +359,28 @@ export default function FindingsPanel({
             </div>
 
             <div className={styles.detailSection}>
-              <h3 className={styles.sectionTitle}>AI Analysis & Insights</h3>
+              <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px'}}>
+                <h3 className={styles.sectionTitle} style={{margin: 0}}>AI Analysis & Insights</h3>
+                <button
+                  onClick={handleHumanize}
+                  disabled={isHumanizing}
+                  style={{
+                    background: "#8b7355", color: "#fff", border: "none", padding: "6px 12px", 
+                    borderRadius: "4px", cursor: isHumanizing ? "not-allowed" : "pointer",
+                    fontSize: "12px", fontWeight: "bold", textTransform: "uppercase",
+                    fontFamily: "Jost, sans-serif"
+                  }}
+                >
+                  {isHumanizing ? "Humanizing..." : "Humanize"}
+                </button>
+              </div>
+
+              {humanizedText && (
+                <div className={styles.insightBox} style={{ background: "rgba(100, 140, 80, 0.1)", border: "1px solid #648c50" }}>
+                  <div className={styles.insightLabel} style={{ color: "#648c50" }}>Plain English Summary</div>
+                  <p className={styles.insightText}>{humanizedText}</p>
+                </div>
+              )}
 
               {selectedFinding.explanation && (
                 <div className={styles.insightBox}>
@@ -379,29 +440,30 @@ export default function FindingsPanel({
       {confirmDeleteId && (
         <div style={{
           position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
-          backgroundColor: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+          backgroundColor: "rgba(0,0,0,0.4)", backdropFilter: "blur(4px)",
           display: "flex", alignItems: "center", justifyContent: "center",
           zIndex: 9999
         }} onClick={() => setConfirmDeleteId(null)}>
           <div onClick={(e) => e.stopPropagation()} style={{
-            background: "#1e1e1e", border: "1px solid rgba(255,100,100,0.3)",
+            background: "#f9f7f4", border: "1px solid rgba(139, 115, 85, 0.3)",
             borderRadius: "12px", padding: "32px", maxWidth: "420px",
-            textAlign: "center", boxShadow: "0 20px 40px rgba(0,0,0,0.6)",
-            display: "flex", flexDirection: "column", gap: "16px"
+            textAlign: "center", boxShadow: "0 20px 40px rgba(139, 115, 85, 0.15)",
+            display: "flex", flexDirection: "column", gap: "16px",
+            fontFamily: "Jost, sans-serif"
           }}>
-            <h3 style={{ color: "#ff6b6b", margin: 0, fontSize: "1.4rem", fontWeight: 700 }}>Confirm Deletion</h3>
-            <p style={{ color: "#a0a0a0", margin: 0, fontSize: "1rem", lineHeight: "1.6" }}>
+            <h3 style={{ color: "#d43a2a", margin: 0, fontSize: "1.4rem", fontWeight: 600 }}>Confirm Deletion</h3>
+            <p style={{ color: "#3d3d3d", margin: 0, fontSize: "1rem", lineHeight: "1.6" }}>
               Are you absolutely sure you want to terminate this instance? This action is irreversible and all local data will be permanently destroyed.
             </p>
             <div style={{ display: "flex", gap: "16px", justifyContent: "center", marginTop: "16px" }}>
               <button
                 onClick={() => setConfirmDeleteId(null)}
                 style={{
-                  padding: "10px 20px", background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.1)",
-                  color: "#eee", borderRadius: "6px", cursor: "pointer", fontWeight: 600, transition: "background 0.2s"
+                  padding: "10px 20px", background: "rgba(139, 115, 85, 0.05)", border: "1px solid rgba(139, 115, 85, 0.2)",
+                  color: "#8b7355", borderRadius: "6px", cursor: "pointer", fontWeight: 600, transition: "background 0.2s"
                 }}
-                onMouseOver={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.1)"}
-                onMouseOut={(e) => e.currentTarget.style.background = "rgba(255,255,255,0.05)"}
+                onMouseOver={(e) => e.currentTarget.style.background = "rgba(139, 115, 85, 0.1)"}
+                onMouseOut={(e) => e.currentTarget.style.background = "rgba(139, 115, 85, 0.05)"}
               >
                 Cancel
               </button>
@@ -411,11 +473,11 @@ export default function FindingsPanel({
                   setConfirmDeleteId(null);
                 }}
                 style={{
-                  padding: "10px 20px", background: "#d32f2f", border: "none",
+                  padding: "10px 20px", background: "#d43a2a", border: "none",
                   color: "#fff", borderRadius: "6px", cursor: "pointer", fontWeight: 600, transition: "background 0.2s"
                 }}
-                onMouseOver={(e) => e.currentTarget.style.background = "#b71c1c"}
-                onMouseOut={(e) => e.currentTarget.style.background = "#d32f2f"}
+                onMouseOver={(e) => e.currentTarget.style.background = "#b92b1d"}
+                onMouseOut={(e) => e.currentTarget.style.background = "#d43a2a"}
               >
                 Yes, Terminate
               </button>
