@@ -21,10 +21,32 @@ load_dotenv()
 
 import firebase_admin
 from firebase_admin import credentials, auth
+import base64
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.backends import default_backend
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi import Security
 
 firebase_project_id = os.getenv("FIREBASE_PROJECT_ID", "tuff-d192d")
+ENCRYPTION_KEY = os.getenv("ENCRYPTION_KEY", "tuff_secret_key_2024").ljust(32, '0')[:32].encode('utf-8')
+
+def decrypt_aes(encrypted_text: str) -> str:
+    try:
+        # If it's not base64 or not long enough, it might be plaintext (fallback)
+        if len(encrypted_text) < 16 or not encrypted_text.endswith("=="):
+            return encrypted_text
+        
+        iv = b"1234567890123456"
+        cipher = Cipher(algorithms.AES(ENCRYPTION_KEY), modes.CBC(iv), backend=default_backend())
+        decryptor = cipher.decryptor()
+        encrypted_bytes = base64.b64decode(encrypted_text)
+        decrypted_padded = decryptor.update(encrypted_bytes) + decryptor.finalize()
+        padding_len = decrypted_padded[-1]
+        return decrypted_padded[:-padding_len].decode('utf-8')
+    except Exception:
+        # Fallback to plain text in case it's not encrypted
+        return encrypted_text
+
 if not firebase_admin._apps:
     try:
         firebase_admin.initialize_app(options={"projectId": firebase_project_id})
@@ -322,6 +344,10 @@ async def analyze_infrastructure(request: ScanRequest, current_user: dict = Depe
     scan_id = str(uuid.uuid4())
     user_id = current_user["uid"]
     
+    # Decrypt credentials if they are encrypted
+    access_key = decrypt_aes(request.aws_access_key)
+    secret_key = decrypt_aes(request.aws_secret_key)
+    
     try:
         user_record = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
         user_tier = user_record.subscription_tier.lower().strip() if user_record else "free"
@@ -332,8 +358,8 @@ async def analyze_infrastructure(request: ScanRequest, current_user: dict = Depe
         if request.region.lower() == "all":
             import boto3
             temp_session = boto3.Session(
-                aws_access_key_id=request.aws_access_key,
-                aws_secret_access_key=request.aws_secret_key,
+                aws_access_key_id=access_key,
+                aws_secret_access_key=secret_key,
                 region_name="us-east-1"
             )
             ec2_client = temp_session.client('ec2')
@@ -344,8 +370,8 @@ async def analyze_infrastructure(request: ScanRequest, current_user: dict = Depe
         for reg in regions:
             try:
                 aws_engine = AWSEngine(
-                    aws_access_key=request.aws_access_key,
-                    aws_secret_key=request.aws_secret_key,
+                    aws_access_key=access_key,
+                    aws_secret_key=secret_key,
                     region_name=reg
                 )
                 raw_findings.extend(aws_engine.execute_full_scan())

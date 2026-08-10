@@ -1,6 +1,24 @@
 import { useState, useEffect } from "react";
 import { api } from "@/app/lib/config";
 import { useAuth } from "@/app/context/AuthContext";
+import CryptoJS from "crypto-js";
+
+const keyStr = (process.env.NEXT_PUBLIC_ENCRYPTION_KEY || "tuff_secret_key_2024").padEnd(32, '0').substring(0, 32);
+const ENC_KEY = CryptoJS.enc.Utf8.parse(keyStr);
+const ENC_IV = CryptoJS.enc.Utf8.parse("1234567890123456");
+
+function encryptData(text: string) {
+  return CryptoJS.AES.encrypt(text, ENC_KEY, { iv: ENC_IV }).toString();
+}
+
+function decryptData(encrypted: string) {
+  try {
+    return CryptoJS.AES.decrypt(encrypted, ENC_KEY, { iv: ENC_IV }).toString(CryptoJS.enc.Utf8);
+  } catch (e) {
+    return encrypted; // Fallback in case it's not encrypted
+  }
+}
+
 
 interface AwsConnectFormProps {
   onScanComplete: (
@@ -23,6 +41,18 @@ export default function AwsConnectForm({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [generatingPolicy, setGeneratingPolicy] = useState(false);
+  const [timeoutExpired, setTimeoutExpired] = useState(false);
+
+  useEffect(() => {
+    let timer: NodeJS.Timeout;
+    if (saving || scanning) {
+      setTimeoutExpired(false);
+      timer = setTimeout(() => {
+        setTimeoutExpired(true);
+      }, 120000); // 2 minutes
+    }
+    return () => clearTimeout(timer);
+  }, [saving, scanning]);
 
   useEffect(() => {
     const saved = localStorage.getItem("aws_credentials");
@@ -33,8 +63,8 @@ export default function AwsConnectForm({
           secretKey: secret,
           region: reg,
         } = JSON.parse(saved);
-        setAccessKey(key);
-        setSecretKey(secret);
+        setAccessKey(decryptData(key));
+        setSecretKey(decryptData(secret));
         setRegion(reg);
       } catch (err) {}
     }
@@ -58,12 +88,15 @@ export default function AwsConnectForm({
         headers["Authorization"] = `Bearer ${token}`;
       }
 
+      const encAccessKey = encryptData(accessKey);
+      const encSecretKey = encryptData(secretKey);
+
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          aws_access_key: accessKey,
-          aws_secret_key: secretKey,
+          aws_access_key: encAccessKey,
+          aws_secret_key: encSecretKey,
           region: region,
         }),
       });
@@ -72,7 +105,7 @@ export default function AwsConnectForm({
         const result = await response.json();
         localStorage.setItem(
           "aws_credentials",
-          JSON.stringify({ accessKey, secretKey, region }),
+          JSON.stringify({ accessKey: encAccessKey, secretKey: encSecretKey, region }),
         );
         setSuccess("AWS credentials saved successfully!");
         onScanComplete(result.data || [], { keyId: accessKey, secretKey: secretKey });
@@ -102,12 +135,15 @@ export default function AwsConnectForm({
         headers["Authorization"] = `Bearer ${token}`;
       }
 
+      const encAccessKey = encryptData(accessKey);
+      const encSecretKey = encryptData(secretKey);
+
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          aws_access_key: accessKey,
-          aws_secret_key: secretKey,
+          aws_access_key: encAccessKey,
+          aws_secret_key: encSecretKey,
           region: region,
         }),
       });
@@ -117,7 +153,7 @@ export default function AwsConnectForm({
       if (response.ok && result.status === "success") {
         localStorage.setItem(
           "aws_credentials",
-          JSON.stringify({ accessKey, secretKey, region }),
+          JSON.stringify({ accessKey: encAccessKey, secretKey: encSecretKey, region }),
         );
         onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
       } else {
@@ -188,6 +224,53 @@ export default function AwsConnectForm({
         marginBottom: "40px",
       }}
     >
+      {(saving || scanning) && (
+        <div style={{
+          position: "fixed",
+          top: "20px",
+          left: "50%",
+          transform: "translateX(-50%)",
+          background: "#fff9c4",
+          border: "1px solid #fbc02d",
+          padding: "16px 24px",
+          borderRadius: "8px",
+          boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+          zIndex: 9999,
+          color: "#f57f17",
+          display: "flex",
+          alignItems: "center",
+          gap: "12px"
+        }}>
+          <div style={{ fontSize: "24px" }}>{timeoutExpired ? "⚠️" : "⏳"}</div>
+          <div>
+            <p style={{ margin: 0, fontWeight: "bold", fontSize: "16px" }}>
+              {timeoutExpired ? "Taking longer than expected" : "Please wait"}
+            </p>
+            <p style={{ margin: 0, fontSize: "14px", marginTop: "4px" }}>
+              {timeoutExpired 
+                ? "The process is taking longer than usual. Please refresh or retry." 
+                : `${scanning ? "Scanning" : "Saving credentials"} may take 1-2 minutes to complete.`}
+            </p>
+            {timeoutExpired && (
+              <button 
+                onClick={() => { setSaving(false); setScanning(false); setTimeoutExpired(false); }}
+                style={{
+                  marginTop: "8px",
+                  padding: "4px 12px",
+                  background: "#fbc02d",
+                  border: "none",
+                  borderRadius: "4px",
+                  color: "#000",
+                  fontWeight: "bold",
+                  cursor: "pointer"
+                }}
+              >
+                Cancel & Retry
+              </button>
+            )}
+          </div>
+        </div>
+      )}
       <h3
         style={{
           textTransform: "uppercase",
