@@ -1,10 +1,10 @@
 "use client"
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../../context/AuthContext";
-import { getAuthErrorMessage, logErrorForDebug } from "../../lib/errorHandler";
+import { logErrorForDebug } from "../../lib/errorHandler";
 import styles from "./login.module.css";
 
 export default function Login() {
@@ -12,8 +12,13 @@ export default function Login() {
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { signIn, signInWithGoogle } = useAuth();
+  const { signIn, signInWithGoogle, user, loading: authLoading } = useAuth();
   const router = useRouter();
+
+  // Someone who is already signed in has no reason to see the form.
+  useEffect(() => {
+    if (!authLoading && user) router.replace("/src/main_page");
+  }, [authLoading, user, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,8 +30,10 @@ export default function Login() {
       router.push("/src/main_page");
     } catch (err) {
       logErrorForDebug(err, 'Login.handleSubmit');
-      const errorMessage = err instanceof Error ? getAuthErrorMessage(err) : "Unable to sign in. Please try again.";
-      setError(errorMessage);
+      // AuthContext has already translated the Firebase error code into
+      // readable copy. Re-running the mapper here discarded it, because a
+      // plain Error carries no `code` and fell through to the generic message.
+      setError(err instanceof Error ? err.message : "Unable to sign in. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -41,8 +48,7 @@ export default function Login() {
       router.push("/src/main_page");
     } catch (err) {
       logErrorForDebug(err, 'Login.handleGoogleSignIn');
-      const errorMessage = err instanceof Error ? getAuthErrorMessage(err) : "Unable to sign in with Google. Please try again.";
-      setError(errorMessage);
+      setError(err instanceof Error ? err.message : "Unable to sign in with Google. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -58,7 +64,11 @@ export default function Login() {
           <h1 className={styles.title}>Welcome Back</h1>
           <p className={styles.subtitle}>Sign in to continue to Tuff</p>
 
-          {error && <div className={styles.error}>{error}</div>}
+          {error && (
+            <div className={styles.error} role="alert" aria-live="assertive">
+              {error}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className={styles.form}>
             <div className={styles.inputGroup}>

@@ -42,12 +42,12 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', color: '#8b7355' }}>
-            <p>To allow TUFF to scan and evaluate your infrastructure, you need to provide read-only AWS credentials. We ensure your keys never leave your browser unencrypted.</p>
+            <p>Tuff needs AWS credentials to read your resource configuration and CloudWatch metrics. Use a dedicated IAM user, never your root account.</p>
             <ol style={{ paddingLeft: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <li><strong>Create an IAM User:</strong> Log in to your AWS Console, navigate to IAM, and create a new user named <code>tuff-agent</code>.</li>
-              <li><strong>Attach Policies:</strong> Attach the <code>ReadOnlyAccess</code> and <code>SecurityAudit</code> policies to this user. This guarantees TUFF cannot modify anything without your explicit approval. </li>
-              <li><strong>Generate Keys:</strong> Create an Access Key for this user (choose "Application running outside AWS").</li>
-              <li><strong>Connect:</strong> Click the "Connect AWS Account" button on the sidebar in TUFF, paste your Access Key and Secret Key, and choose your primary region.</li>
+              <li><strong>Create an IAM user:</strong> In the AWS Console, go to IAM and create a user named <code>tuff-agent</code>.</li>
+              <li><strong>Attach a policy:</strong> Click <em>Download IAM Policy</em> on the Connect AWS Account panel and attach it to the user. It contains two parts — a read-only block used for scanning, and a remediation block used only when you approve an action. If you want Tuff to be strictly read-only, delete every statement except <code>TUFFReadOnlyAccess</code> before attaching it; the scan will work and approvals will fail with an access-denied error.</li>
+              <li><strong>Generate keys:</strong> Create an access key for this user (choose &quot;Application running outside AWS&quot;).</li>
+              <li><strong>Connect:</strong> Click &quot;Connect AWS Account&quot; in the sidebar, paste the keys, and pick a region.</li>
             </ol>
             <div style={{ 
               marginTop: '12px', 
@@ -60,7 +60,10 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
             }}>
               <Info style={{ color: '#8b7355', flexShrink: 0 }} />
               <p style={{ margin: 0, fontSize: '14px' }}>
-                For automatic remediation features, you will need to approve generated IAM policies on a per-action basis. TUFF handles this by providing a zero-trust policy generation workflow.
+                <strong>How your keys are handled:</strong> they are encrypted and kept only in this
+                browser tab, then discarded when you sign out or close the tab. They are sent to the
+                Tuff API to run each scan or approved action and are never written to our database.
+                Rotate them in AWS if you ever suspect exposure.
               </p>
             </div>
           </div>
@@ -81,12 +84,12 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
           </div>
           
           <div style={{ display: 'flex', flexDirection: 'column', gap: '16px', color: '#8b7355' }}>
-            <p>TUFF supports real-time dashboard synchronization when cloud resources are deleted via the AWS console. To enable this, set up an AWS EventBridge webhook:</p>
+            <p>Tuff can prune findings automatically when you delete a resource directly in the AWS console. This is optional and needs a little setup:</p>
             <ol style={{ paddingLeft: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
-              <li><strong>IAM Permissions:</strong> Ensure your TUFF IAM user has permissions to configure EventBridge. You can use our AI Policy Generator to automatically generate the necessary JSON for this!</li>
-              <li><strong>Create EventBridge Rule:</strong> Navigate to Amazon EventBridge, and create a rule matching AWS API Call via CloudTrail for deletion events (e.g., <code>TerminateInstances</code>, <code>DeleteVolume</code>).</li>
-              <li><strong>Set the Target:</strong> Configure an API Destination (or an SNS Topic with HTTP subscription) pointing to your hosted TUFF Webhook URL: <code>/api/webhooks/aws</code>.</li>
-              <li><strong>Confirm:</strong> TUFF automatically handles SNS Subscription Confirmations. Once active, your dashboard will seamlessly update in real-time when resources are deleted directly in AWS.</li>
+              <li><strong>IAM permissions:</strong> The downloadable policy already includes the EventBridge and SNS permissions needed to create the rule.</li>
+              <li><strong>Create an EventBridge rule:</strong> In Amazon EventBridge, create a rule matching <em>AWS API Call via CloudTrail</em> for deletion events such as <code>TerminateInstances</code>, <code>DeleteVolume</code>, <code>DeleteDBInstance</code>, <code>DeleteBucket</code> and <code>DeleteVpc</code>.</li>
+              <li><strong>Point it at Tuff:</strong> Use an API Destination (or an SNS topic with an HTTPS subscription) targeting <code>/api/webhooks/aws?user_id=&lt;your Tuff user id&gt;</code>.</li>
+              <li><strong>Add the shared secret:</strong> The endpoint only accepts deliveries carrying the <code>X-Tuff-Webhook-Secret</code> header, which your operator configures as <code>AWS_WEBHOOK_SECRET</code>. Add it as a static header on the API Destination connection. Without it the webhook is rejected, because anything that can post here can modify your scan history.</li>
             </ol>
           </div>
         </section>
@@ -117,7 +120,8 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
             <div style={{ padding: '20px', border: '1px solid rgba(139, 115, 85, 0.1)', borderRadius: '12px', background: 'rgba(255, 255, 255, 0.3)' }}>
               <h4 style={{ fontSize: '18px', fontWeight: 600, color: '#6b5344', marginBottom: '12px' }}>Cost Explorer</h4>
               <p style={{ color: '#8b7355', fontSize: '14px', lineHeight: '1.6' }}>
-                Discover unused resources and over-provisioned instances. TUFF's AI estimates potential monthly savings and provides 1-click resize/terminate scripts.
+                Discover unused resources and over-provisioned instances. Tuff estimates the
+                potential monthly saving for each one and can apply the fix once you approve it.
               </p>
             </div>
 
@@ -147,15 +151,18 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
           
           <div style={{ color: '#8b7355', marginBottom: '24px', lineHeight: '1.6' }}>
             <p>
-              Free tier users receive 1,000 AI Credits and standard analysis via our fast models. However, large infrastructure scans and complex automated remediations require deeper reasoning capabilities. 
+              Free accounts start with 1,000 AI credits. Each finding Tuff analyses costs roughly
+              100 credits, so a free account covers about 10 findings. Once the credits run out,
+              scanning still works and findings are still listed — they just arrive without the AI
+              explanation until you upgrade.
             </p>
             <p style={{ marginTop: '12px' }}>
-              By upgrading to <strong>TUFF Pro</strong> (₹1,000 one-time), you permanently unlock:
+              <strong>Tuff Pro</strong> is ₹299/month or ₹3,399/year and includes:
             </p>
             <ul style={{ paddingLeft: '24px', marginTop: '12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-              <li><strong>10,000 Premium AI Credits:</strong> Enough for thousands of deep infrastructure audits.</li>
-              <li><strong>Google Gemini 2.5 Pro:</strong> Replaces the standard model with state-of-the-art reasoning for zero-trust security and exact IAM policy generation.</li>
-              <li><strong>Expanded Rate Limits:</strong> Process up to 250,000 tokens per session.</li>
+              <li><strong>10,000 AI credits</strong> added to your balance.</li>
+              <li><strong>No free-tier cap:</strong> every finding in a scan gets analysed.</li>
+              <li><strong>Higher rate limits</strong> for scans and remediation.</li>
             </ul>
           </div>
 

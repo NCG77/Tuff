@@ -18,6 +18,7 @@ import {
 } from "firebase/auth";
 import { auth } from "../lib/firebase";
 import { getAuthErrorMessage, logErrorForDebug } from "../lib/errorHandler";
+import { clearCredentials, purgeLegacyCredentials } from "../lib/credentials";
 
 interface AuthContextType {
   user: User | null;
@@ -35,9 +36,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      setUser(user);
+    // Credentials written by older builds lived in localStorage and outlived
+    // sign-out; remove them the first time the new client runs.
+    purgeLegacyCredentials();
+
+    const unsubscribe = onAuthStateChanged(auth, (nextUser) => {
+      setUser(nextUser);
       setLoading(false);
+      if (!nextUser) {
+        // Never leave AWS keys behind for whoever signs in next.
+        clearCredentials();
+      }
     });
 
     return () => unsubscribe();
@@ -72,7 +81,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   };
 
   const logout = async () => {
-    await signOut(auth);
+    clearCredentials();
+    try {
+      await signOut(auth);
+    } catch (error) {
+      logErrorForDebug(error, "AuthContext.logout");
+      throw new Error("Could not sign you out. Please try again.");
+    }
   };
 
   return (

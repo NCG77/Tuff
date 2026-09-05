@@ -1,8 +1,10 @@
 "use client";
 
+import type { DashboardTab } from "@/app/lib/types";
+
 interface TabFiltersProps {
-  activeTab: "all" | "cost" | "security" | "logs" | "alerts";
-  setActiveTab: (tab: "all" | "cost" | "security" | "logs" | "alerts") => void;
+  activeTab: DashboardTab;
+  setActiveTab: (tab: DashboardTab) => void;
   allCount: number;
   costCount: number;
   securityCount: number;

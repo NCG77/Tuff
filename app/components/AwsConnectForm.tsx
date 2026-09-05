@@ -1,217 +1,235 @@
-import { useState, useEffect } from "react";
-import { api } from "@/app/lib/config";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { api, devLog, extractErrorMessage, networkErrorMessage } from "@/app/lib/config";
 import { useAuth } from "@/app/context/AuthContext";
-import CryptoJS from "crypto-js";
-
-const keyStr = (process.env.NEXT_PUBLIC_ENCRYPTION_KEY || "tuff_secret_key_2024").padEnd(32, '0').substring(0, 32);
-const ENC_KEY = CryptoJS.enc.Utf8.parse(keyStr);
-const ENC_IV = CryptoJS.enc.Utf8.parse("1234567890123456");
-
-function encryptData(text: string) {
-  return CryptoJS.AES.encrypt(text, ENC_KEY, { iv: ENC_IV }).toString();
-}
-
-function decryptData(encrypted: string) {
-  try {
-    return CryptoJS.AES.decrypt(encrypted, ENC_KEY, { iv: ENC_IV }).toString(CryptoJS.enc.Utf8);
-  } catch (e) {
-    return encrypted; // Fallback in case it's not encrypted
-  }
-}
-
+import {
+  clearCredentials,
+  getPreferredRegion,
+  isEncryptionConfigured,
+  loadCredentials,
+  saveCredentials,
+  setPreferredRegion,
+  validateCredentialInput,
+} from "@/app/lib/credentials";
+import type { Finding } from "@/app/lib/types";
 
 interface AwsConnectFormProps {
   onScanComplete: (
-    findings: any[],
-    credentials: { keyId: string; secretKey: string },
+    findings: Finding[],
+    credentials: { accessKey: string; secretKey: string; region: string },
   ) => void;
   onTokenLimit?: () => void;
+  onCreditsChange?: (credits: number) => void;
 }
+
+const REGIONS = [
+  { value: "all", label: "All Regions (slower)" },
+  { value: "us-east-1", label: "US East (N. Virginia)" },
+  { value: "us-east-2", label: "US East (Ohio)" },
+  { value: "us-west-2", label: "US West (Oregon)" },
+  { value: "eu-west-1", label: "Europe (Ireland)" },
+  { value: "eu-central-1", label: "Europe (Frankfurt)" },
+  { value: "ap-southeast-1", label: "Asia Pacific (Singapore)" },
+  { value: "ap-south-1", label: "Asia Pacific (Mumbai)" },
+];
+
+// A full multi-region scan legitimately takes a while; only warn once it is
+// clearly longer than normal.
+const SLOW_SCAN_NOTICE_MS = 90_000;
 
 export default function AwsConnectForm({
   onScanComplete,
-  ...props
+  onTokenLimit,
+  onCreditsChange,
 }: AwsConnectFormProps) {
   const { user } = useAuth();
-  const [accessKey, setAccessKey] = useState("");
-  const [secretKey, setSecretKey] = useState("");
-  const [region, setRegion] = useState("us-east-1");
+
+  // Decrypt the stored credentials once, during the first render, and seed the
+  // form fields from them. This component only mounts after authentication has
+  // resolved on the client, so touching browser storage here is safe and
+  // avoids an extra render pass.
+  const initial = useMemo(() => {
+    const stored = user ? loadCredentials(user.uid) : null;
+    return {
+      accessKey: stored?.accessKey ?? "",
+      secretKey: stored?.secretKey ?? "",
+      region: stored?.region ?? getPreferredRegion(),
+    };
+  }, [user]);
+
+  const [accessKey, setAccessKey] = useState(initial.accessKey);
+  const [secretKey, setSecretKey] = useState(initial.secretKey);
+  const [region, setRegion] = useState(initial.region);
   const [scanning, setScanning] = useState(false);
-  const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [generatingPolicy, setGeneratingPolicy] = useState(false);
-  const [timeoutExpired, setTimeoutExpired] = useState(false);
+  const [showSlowNotice, setShowSlowNotice] = useState(false);
+  const [hasStoredCredentials, setHasStoredCredentials] = useState(Boolean(initial.accessKey));
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
-    let timer: NodeJS.Timeout;
-    if (saving || scanning) {
-      setTimeoutExpired(false);
-      timer = setTimeout(() => {
-        setTimeoutExpired(true);
-      }, 120000); // 2 minutes
-    }
+    if (!scanning) return;
+    const timer = setTimeout(() => setShowSlowNotice(true), SLOW_SCAN_NOTICE_MS);
     return () => clearTimeout(timer);
-  }, [saving, scanning]);
+  }, [scanning]);
 
-  useEffect(() => {
-    const saved = localStorage.getItem("aws_credentials");
-    if (saved) {
-      try {
-        const {
-          accessKey: key,
-          secretKey: secret,
-          region: reg,
-        } = JSON.parse(saved);
-        setAccessKey(decryptData(key));
-        setSecretKey(decryptData(secret));
-        setRegion(reg);
-      } catch (err) {}
-    }
-  }, []);
+  // Abandon an in-flight scan if the form unmounts, so its result cannot be
+  // applied to a dashboard the user has already navigated away from.
+  useEffect(() => () => abortRef.current?.abort(), []);
 
-  const handleSaveCredentials = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!accessKey || !secretKey) {
-      setError("Access Key and Secret Key are required");
+  const runScan = async () => {
+    if (!user) {
+      setError("Please sign in again before connecting an AWS account.");
       return;
     }
 
-    setSaving(true);
+    const validationError = validateCredentialInput(accessKey, secretKey);
+    if (validationError) {
+      setError(validationError);
+      return;
+    }
+
+    setShowSlowNotice(false);
+    setScanning(true);
     setError("");
     setSuccess("");
 
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (user) {
-        const token = await user.getIdToken();
-        headers["Authorization"] = `Bearer ${token}`;
-      }
+    const controller = new AbortController();
+    abortRef.current = controller;
 
-      const encAccessKey = encryptData(accessKey);
-      const encSecretKey = encryptData(secretKey);
+    try {
+      const token = await user.getIdToken();
+      // Encrypt once and reuse the same envelope for storage and for the
+      // request, so the browser never holds or transmits the raw secret.
+      const stored = saveCredentials(user.uid, {
+        accessKey: accessKey.trim(),
+        secretKey: secretKey.trim(),
+        region,
+      });
+      setHasStoredCredentials(true);
+      setPreferredRegion(region);
 
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
-        headers,
+        signal: controller.signal,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
         body: JSON.stringify({
-          aws_access_key: encAccessKey,
-          aws_secret_key: encSecretKey,
-          region: region,
+          aws_access_key: stored.accessKey,
+          aws_secret_key: stored.secretKey,
+          region,
         }),
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        localStorage.setItem(
-          "aws_credentials",
-          JSON.stringify({ accessKey: encAccessKey, secretKey: encSecretKey, region }),
-        );
-        setSuccess("AWS credentials saved successfully!");
-        onScanComplete(result.data || [], { keyId: accessKey, secretKey: secretKey });
-        setTimeout(() => setSuccess(""), 3000);
-      } else {
-        const result = await response.json();
-        setError(result.detail || "Failed to verify AWS credentials.");
+      if (!response.ok) {
+        // 402/429 mean the account is out of AI credits rather than that the
+        // credentials are wrong, so route the user to the upgrade flow.
+        if ((response.status === 429 || response.status === 402) && onTokenLimit) {
+          onTokenLimit();
+          return;
+        }
+        setError(await extractErrorMessage(response, "Tuff could not analyse your AWS account."));
+        return;
       }
+
+      const result = await response.json();
+      const findings: Finding[] = Array.isArray(result?.data) ? result.data : [];
+
+      if (typeof result?.credits_remaining === "number") {
+        onCreditsChange?.(result.credits_remaining);
+      }
+
+      const notes: string[] = [`Connected. ${findings.length} finding(s) returned.`];
+      if (result?.failed_regions?.length) {
+        notes.push(`Could not read: ${result.failed_regions.join(", ")}.`);
+      }
+      if (result?.deferred_count) {
+        notes.push(`${result.deferred_count} finding(s) need Pro for AI analysis.`);
+      }
+      setSuccess(notes.join(" "));
+
+      onScanComplete(findings, {
+        accessKey: accessKey.trim(),
+        secretKey: secretKey.trim(),
+        region,
+      });
     } catch (err) {
-      setError(
-        "Connection to backend API failed. Unable to verify credentials.",
-      );
+      if (err instanceof DOMException && err.name === "AbortError") return;
+      devLog("AWS scan failed", err);
+      setError(networkErrorMessage());
     } finally {
-      setSaving(false);
+      setScanning(false);
+      abortRef.current = null;
     }
   };
 
-  const handleScan = async (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setScanning(true);
+    await runScan();
+  };
+
+  const handleDisconnect = () => {
+    clearCredentials();
+    setAccessKey("");
+    setSecretKey("");
+    setHasStoredCredentials(false);
+    setSuccess("AWS credentials removed from this browser.");
     setError("");
-
-    try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (user) {
-        const token = await user.getIdToken();
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
-      const encAccessKey = encryptData(accessKey);
-      const encSecretKey = encryptData(secretKey);
-
-      const response = await fetch(api.endpoints.analyze, {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          aws_access_key: encAccessKey,
-          aws_secret_key: encSecretKey,
-          region: region,
-        }),
-      });
-
-      const result = await response.json();
-
-      if (response.ok && result.status === "success") {
-        localStorage.setItem(
-          "aws_credentials",
-          JSON.stringify({ accessKey: encAccessKey, secretKey: encSecretKey, region }),
-        );
-        onScanComplete(result.data, { keyId: accessKey, secretKey: secretKey });
-      } else {
-        if (response.status === 429 && props.onTokenLimit) {
-          props.onTokenLimit();
-        } else {
-          setError(result.detail || "Failed to analyze cloud environment.");
-        }
-      }
-    } catch (err) {
-      setError("Connection to backend API failed.");
-    } finally {
-      setScanning(false);
-    }
   };
 
   const handleGenerateIAMPolicy = async () => {
+    if (!user) {
+      setError("Please sign in again to download the IAM policy.");
+      return;
+    }
+
     setGeneratingPolicy(true);
     setError("");
 
+    let url: string | null = null;
+    let link: HTMLAnchorElement | null = null;
     try {
-      const headers: Record<string, string> = { "Content-Type": "application/json" };
-      if (user) {
-        const token = await user.getIdToken();
-        headers["Authorization"] = `Bearer ${token}`;
-      }
-
+      const token = await user.getIdToken();
       const response = await fetch(api.endpoints.generateIAMPolicy, {
         method: "POST",
-        headers,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
       });
 
-      if (response.ok) {
-        const result = await response.json();
-        const policy = result.policy;
-        const dataStr = JSON.stringify(policy, null, 2);
-        const dataBlob = new Blob([dataStr], { type: "application/json" });
-        const url = URL.createObjectURL(dataBlob);
-        const link = document.createElement("a");
-        link.href = url;
-        link.download = `tuff-iam-policy-${new Date().toISOString().split("T")[0]}.json`;
-        document.body.appendChild(link);
-        link.click();
-        document.body.removeChild(link);
-        URL.revokeObjectURL(url);
-
-        setSuccess("IAM policy downloaded successfully! Use this policy to create an IAM user with minimum required permissions.");
-        setTimeout(() => setSuccess(""), 5000);
-      } else {
-        const errData = await response.json();
-        setError(errData.detail || "Failed to generate IAM policy");
+      if (!response.ok) {
+        setError(await extractErrorMessage(response, "Could not generate the IAM policy."));
+        return;
       }
+
+      const result = await response.json();
+      const dataBlob = new Blob([JSON.stringify(result.policy, null, 2)], {
+        type: "application/json",
+      });
+      url = URL.createObjectURL(dataBlob);
+      link = document.createElement("a");
+      link.href = url;
+      link.download = `tuff-iam-policy-${new Date().toISOString().split("T")[0]}.json`;
+      document.body.appendChild(link);
+      link.click();
+
+      setSuccess("IAM policy downloaded. Attach it to a dedicated IAM user for Tuff.");
     } catch (err) {
-      setError("Connection to backend API failed. Please ensure the backend is running.");
+      devLog("IAM policy download failed", err);
+      setError(networkErrorMessage());
     } finally {
+      // Cleanup runs even when the click handler throws, so we don't leak the
+      // object URL or leave a stray anchor in the DOM.
+      if (link?.parentNode) link.parentNode.removeChild(link);
+      if (url) URL.revokeObjectURL(url);
       setGeneratingPolicy(false);
     }
   };
+
+  const canScan = !scanning && accessKey.trim().length > 0 && secretKey.trim().length > 0;
 
   return (
     <div
@@ -224,53 +242,59 @@ export default function AwsConnectForm({
         marginBottom: "40px",
       }}
     >
-      {(saving || scanning) && (
-        <div style={{
-          position: "fixed",
-          top: "20px",
-          left: "50%",
-          transform: "translateX(-50%)",
-          background: "#fff9c4",
-          border: "1px solid #fbc02d",
-          padding: "16px 24px",
-          borderRadius: "8px",
-          boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
-          zIndex: 9999,
-          color: "#f57f17",
-          display: "flex",
-          alignItems: "center",
-          gap: "12px"
-        }}>
-          <div style={{ fontSize: "24px" }}>{timeoutExpired ? "⚠️" : "⏳"}</div>
+      {scanning && (
+        <div
+          role="status"
+          aria-live="polite"
+          style={{
+            position: "fixed",
+            top: "20px",
+            left: "50%",
+            transform: "translateX(-50%)",
+            background: "#fff9c4",
+            border: "1px solid #fbc02d",
+            padding: "16px 24px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+            zIndex: 9999,
+            color: "#f57f17",
+            display: "flex",
+            alignItems: "center",
+            gap: "12px",
+          }}
+        >
+          <div style={{ fontSize: "24px" }}>{showSlowNotice ? "⚠️" : "⏳"}</div>
           <div>
             <p style={{ margin: 0, fontWeight: "bold", fontSize: "16px" }}>
-              {timeoutExpired ? "Taking longer than expected" : "Please wait"}
+              {showSlowNotice ? "Still working" : "Scanning your AWS account"}
             </p>
-            <p style={{ margin: 0, fontSize: "14px", marginTop: "4px" }}>
-              {timeoutExpired 
-                ? "The process is taking longer than usual. Please refresh or retry." 
-                : `${scanning ? "Scanning" : "Saving credentials"} may take 1-2 minutes to complete.`}
+            <p style={{ margin: "4px 0 0", fontSize: "14px" }}>
+              {showSlowNotice
+                ? "Large accounts and all-region scans can take several minutes."
+                : region === "all"
+                  ? "Reading every region — this usually takes 1-3 minutes."
+                  : "Reading CloudWatch metrics and resource configuration."}
             </p>
-            {timeoutExpired && (
-              <button 
-                onClick={() => { setSaving(false); setScanning(false); setTimeoutExpired(false); }}
-                style={{
-                  marginTop: "8px",
-                  padding: "4px 12px",
-                  background: "#fbc02d",
-                  border: "none",
-                  borderRadius: "4px",
-                  color: "#000",
-                  fontWeight: "bold",
-                  cursor: "pointer"
-                }}
-              >
-                Cancel & Retry
-              </button>
-            )}
+            <button
+              type="button"
+              onClick={() => abortRef.current?.abort()}
+              style={{
+                marginTop: "8px",
+                padding: "4px 12px",
+                background: "#fbc02d",
+                border: "none",
+                borderRadius: "4px",
+                color: "#000",
+                fontWeight: "bold",
+                cursor: "pointer",
+              }}
+            >
+              Cancel scan
+            </button>
           </div>
         </div>
       )}
+
       <h3
         style={{
           textTransform: "uppercase",
@@ -286,36 +310,31 @@ export default function AwsConnectForm({
 
       {error && (
         <p
-          style={{
-            color: "#d43a2a",
-            fontSize: "12px",
-            marginBottom: "12px",
-            fontWeight: 500,
-          }}
+          role="alert"
+          style={{ color: "#d43a2a", fontSize: "12px", marginBottom: "12px", fontWeight: 500 }}
         >
           {error}
         </p>
       )}
       {success && (
         <p
-          style={{
-            color: "#648c50",
-            fontSize: "12px",
-            marginBottom: "12px",
-            fontWeight: 500,
-          }}
+          role="status"
+          style={{ color: "#648c50", fontSize: "12px", marginBottom: "12px", fontWeight: 500 }}
         >
           ✓ {success}
         </p>
       )}
 
-      <form
-        onSubmit={handleSaveCredentials}
-        style={{ display: "flex", flexDirection: "column", gap: "12px" }}
-      >
+      <form onSubmit={handleSubmit} style={{ display: "flex", flexDirection: "column", gap: "12px" }}>
+        <label htmlFor="aws-access-key" style={{ fontSize: "12px", color: "#3d3d3d", fontWeight: 600 }}>
+          AWS Access Key ID
+        </label>
         <input
+          id="aws-access-key"
           type="text"
-          placeholder="AWS Access Key ID"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="AKIA..."
           value={accessKey}
           onChange={(e) => setAccessKey(e.target.value)}
           required
@@ -327,9 +346,16 @@ export default function AwsConnectForm({
             borderRadius: "4px",
           }}
         />
+
+        <label htmlFor="aws-secret-key" style={{ fontSize: "12px", color: "#3d3d3d", fontWeight: 600 }}>
+          AWS Secret Access Key
+        </label>
         <input
+          id="aws-secret-key"
           type="password"
-          placeholder="AWS Secret Access Key"
+          autoComplete="off"
+          spellCheck={false}
+          placeholder="••••••••••••••••••••"
           value={secretKey}
           onChange={(e) => setSecretKey(e.target.value)}
           required
@@ -341,7 +367,12 @@ export default function AwsConnectForm({
             borderRadius: "4px",
           }}
         />
+
+        <label htmlFor="aws-region" style={{ fontSize: "12px", color: "#3d3d3d", fontWeight: 600 }}>
+          Region
+        </label>
         <select
+          id="aws-region"
           value={region}
           onChange={(e) => setRegion(e.target.value)}
           style={{
@@ -352,62 +383,32 @@ export default function AwsConnectForm({
             borderRadius: "4px",
           }}
         >
-          <option value="all">All Regions</option>
-          <option value="us-east-1">US East (N. Virginia)</option>
-          <option value="us-west-2">US West (Oregon)</option>
-          <option value="eu-west-1">Europe (Ireland)</option>
-          <option value="ap-southeast-1">Asia Pacific (Singapore)</option>
-          <option value="ap-south-1">Asia Pacific (Mumbai)</option>
+          {REGIONS.map((r) => (
+            <option key={r.value} value={r.value}>
+              {r.label}
+            </option>
+          ))}
         </select>
 
-        <div style={{ display: "flex", gap: "12px" }}>
-          <button
-            type="submit"
-            disabled={saving}
-            style={{
-              flex: 1,
-              background: saving ? "#d3d3d3" : "#8b7355",
-              color: "#ffffff",
-              padding: "12px",
-              border: "none",
-              borderRadius: "4px",
-              cursor: saving ? "not-allowed" : "pointer",
-              textTransform: "uppercase",
-              fontWeight: "bold",
-              letterSpacing: ".1em",
-              fontSize: "12px",
-              transition: "background 0.3s",
-            }}
-          >
-            {saving ? "VERIFYING..." : "SAVE CREDENTIALS"}
-          </button>
-
-          <button
-            type="button"
-            onClick={handleScan}
-            disabled={scanning || !accessKey || !secretKey}
-            style={{
-              flex: 1,
-              background:
-                scanning || !accessKey || !secretKey ? "#d3d3d3" : "#648c50",
-              color: "#ffffff",
-              padding: "12px",
-              border: "none",
-              borderRadius: "4px",
-              cursor:
-                scanning || !accessKey || !secretKey
-                  ? "not-allowed"
-                  : "pointer",
-              textTransform: "uppercase",
-              fontWeight: "bold",
-              letterSpacing: ".1em",
-              fontSize: "12px",
-              transition: "background 0.3s",
-            }}
-          >
-            {scanning ? "SCANNING..." : "SCAN NOW →"}
-          </button>
-        </div>
+        <button
+          type="submit"
+          disabled={!canScan}
+          style={{
+            background: canScan ? "#648c50" : "#d3d3d3",
+            color: "#ffffff",
+            padding: "12px",
+            border: "none",
+            borderRadius: "4px",
+            cursor: canScan ? "pointer" : "not-allowed",
+            textTransform: "uppercase",
+            fontWeight: "bold",
+            letterSpacing: ".1em",
+            fontSize: "12px",
+            transition: "background 0.3s",
+          }}
+        >
+          {scanning ? "SCANNING..." : "CONNECT & SCAN →"}
+        </button>
 
         <button
           type="button"
@@ -425,13 +426,39 @@ export default function AwsConnectForm({
             fontWeight: "bold",
             letterSpacing: ".1em",
             fontSize: "12px",
-            transition: "background 0.3s",
-            marginTop: "8px",
           }}
         >
-          {generatingPolicy ? "⟳ GENERATING..." : "GENERATE IAM POLICY"}
+          {generatingPolicy ? "⟳ GENERATING..." : "DOWNLOAD IAM POLICY"}
         </button>
+
+        {hasStoredCredentials && (
+          <button
+            type="button"
+            onClick={handleDisconnect}
+            style={{
+              width: "100%",
+              background: "transparent",
+              color: "#d43a2a",
+              padding: "10px",
+              border: "1px solid rgba(212, 58, 42, 0.35)",
+              borderRadius: "4px",
+              cursor: "pointer",
+              textTransform: "uppercase",
+              fontWeight: 600,
+              letterSpacing: ".1em",
+              fontSize: "11px",
+            }}
+          >
+            Disconnect & forget keys
+          </button>
+        )}
       </form>
+
+      <p style={{ fontSize: "11px", color: "#8b7355", marginTop: "16px", lineHeight: 1.6 }}>
+        Keys are held only for this browser tab and are cleared when you sign out or close it.
+        {!isEncryptionConfigured && " Set NEXT_PUBLIC_ENCRYPTION_KEY to encrypt them at rest."} Use a
+        dedicated IAM user with the downloadable policy above rather than your root credentials.
+      </p>
     </div>
   );
 }

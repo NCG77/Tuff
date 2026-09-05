@@ -1,11 +1,13 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { useAuth } from "../../context/AuthContext";
-import { getAuthErrorMessage, logErrorForDebug } from "../../lib/errorHandler";
+import { logErrorForDebug } from "../../lib/errorHandler";
 import styles from "./index.module.css";
+
+const MIN_PASSWORD_LENGTH = 8;
 
 export default function SignupPage() {
   const [email, setEmail] = useState("");
@@ -13,8 +15,12 @@ export default function SignupPage() {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const { signUp, signInWithGoogle } = useAuth();
+  const { signUp, signInWithGoogle, user, loading: authLoading } = useAuth();
   const router = useRouter();
+
+  useEffect(() => {
+    if (!authLoading && user) router.replace("/src/main_page");
+  }, [authLoading, user, router]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -25,8 +31,15 @@ export default function SignupPage() {
       return;
     }
 
-    if (password.length < 6) {
-      setError("Password must be at least 6 characters");
+    // Tuff holds AWS credentials that can stop and delete infrastructure, so
+    // the 6-character Firebase floor is too low for this account.
+    if (password.length < MIN_PASSWORD_LENGTH) {
+      setError(`Password must be at least ${MIN_PASSWORD_LENGTH} characters`);
+      return;
+    }
+
+    if (!/[a-zA-Z]/.test(password) || !/[0-9]/.test(password)) {
+      setError("Password must include at least one letter and one number");
       return;
     }
 
@@ -37,8 +50,8 @@ export default function SignupPage() {
       router.push("/src/main_page");
     } catch (err) {
       logErrorForDebug(err, 'Signup.handleSubmit');
-      const errorMessage = err instanceof Error ? getAuthErrorMessage(err) : "Unable to create account. Please try again.";
-      setError(errorMessage);
+      // AuthContext already mapped the Firebase code to readable copy.
+      setError(err instanceof Error ? err.message : "Unable to create account. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -53,8 +66,7 @@ export default function SignupPage() {
       router.push("/src/main_page");
     } catch (err) {
       logErrorForDebug(err, 'Signup.handleGoogleSignIn');
-      const errorMessage = err instanceof Error ? getAuthErrorMessage(err) : "Unable to sign in with Google. Please try again.";
-      setError(errorMessage);
+      setError(err instanceof Error ? err.message : "Unable to sign in with Google. Please try again.");
     } finally {
       setLoading(false);
     }
@@ -70,7 +82,11 @@ export default function SignupPage() {
           <h1 className={styles.title}>Create Account</h1>
           <p className={styles.subtitle}>Get started with Tuff</p>
     
-          {error && <div className={styles.error}>{error}</div>}
+          {error && (
+            <div className={styles.error} role="alert" aria-live="assertive">
+              {error}
+            </div>
+          )}
 
           <form onSubmit={handleSubmit} className={styles.form}>
             <div className={styles.inputGroup}>
@@ -99,8 +115,13 @@ export default function SignupPage() {
                 onChange={(e) => setPassword(e.target.value)}
                 className={styles.input}
                 placeholder="Create a password"
+                autoComplete="new-password"
+                minLength={MIN_PASSWORD_LENGTH}
                 required
               />
+              <p className={styles.subtitle} style={{ margin: "6px 0 0", fontSize: "12px" }}>
+                At least {MIN_PASSWORD_LENGTH} characters, including a letter and a number.
+              </p>
             </div>
 
             <div className={styles.inputGroup}>

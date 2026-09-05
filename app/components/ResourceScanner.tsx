@@ -1,5 +1,6 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
 import styles from "@/app/src/main_page/page.module.css";
+import { getPreferredRegion, setPreferredRegion } from "@/app/lib/credentials";
 
 interface ResourceScannerProps {
   scanningResource: string | null;
@@ -10,19 +11,10 @@ export default function ResourceScanner({
   scanningResource,
   onScanResourceType,
 }: ResourceScannerProps) {
-  const [selectedRegion, setSelectedRegion] = useState("all");
-
-  useEffect(() => {
-    const saved = localStorage.getItem("aws_credentials");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        if (parsed.region) {
-          setSelectedRegion(parsed.region);
-        }
-      } catch (e) {}
-    }
-  }, []);
+  // Read once on mount via a lazy initialiser. This component only ever
+  // renders after authentication resolves on the client, so reading browser
+  // storage here cannot cause a hydration mismatch.
+  const [selectedRegion, setSelectedRegion] = useState(getPreferredRegion);
 
   const resourceTypes = [
     { id: "ec2", title: "EC2 Instances", desc: "Find idle or underutilized instances" },
@@ -40,8 +32,12 @@ export default function ResourceScanner({
           Select Resource Type to Analyze
         </h3>
         <select
+          aria-label="Region to scan"
           value={selectedRegion}
-          onChange={(e) => setSelectedRegion(e.target.value)}
+          onChange={(e) => {
+            setSelectedRegion(e.target.value);
+            setPreferredRegion(e.target.value);
+          }}
           disabled={scanningResource !== null}
           style={{
             background: "rgba(255, 255, 255, 0.95)",

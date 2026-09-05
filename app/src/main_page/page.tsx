@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import { useAuth } from "../../context/AuthContext";
 import AwsConnectForm from "@/app/components/AwsConnectForm";
@@ -19,675 +19,783 @@ import {
   Bell,
   HelpCircle,
   LogOut,
+  ShieldAlert,
 } from "lucide-react";
-import { api, devLog, devError } from "@/app/lib/config";
+import { api, devLog, devError, extractErrorMessage, networkErrorMessage } from "@/app/lib/config";
+import {
+  getPreferredRegion,
+  loadEncryptedCredentials,
+  setPreferredRegion,
+} from "@/app/lib/credentials";
+import { sumSavings } from "@/app/lib/format";
+import type {
+  ActionRecord,
+  AlertConfig,
+  DashboardTab,
+  Finding,
+  TriggeredAlert,
+} from "@/app/lib/types";
 import "../landing_page/index.css";
 import styles from "./page.module.css";
+
+const TAB_TITLES: Record<DashboardTab, string> = {
+  all: "Cloud Resource Overview",
+  cost: "Cost Explorer",
+  security: "Security Findings",
+  logs: "Previous Actions & Logs",
+  alerts: "Alert Configuration & History",
+  help: "Help & Documentation",
+};
+
+/**
+ * Map a finding to the remediation the backend should run.
+ *
+ * Order matters: "Scaling Candidate (EC2)" also contains "EC2", so the more
+ * specific issue types are checked first.
+ */
+function defaultActionFor(finding: Finding): string {
+  const type = finding.type || "";
+  if (type.includes("Volume")) return "delete_volume";
+  if (type.includes("S3")) return "secure_s3";
+  if (type.includes("Scaling")) return "scale_instance";
+  // Stopping an idle database is reversible; deleting it is not.
+  if (type.includes("RDS")) return "stop_rds";
+  if (type.includes("VPC")) return "delete_vpc";
+  return "stop_instance";
+}
 
 export default function MainPage() {
   const { user, loading, logout } = useAuth();
   const router = useRouter();
 
-  const [findings, setFindings] = useState<any[]>([]);
+  const [findings, setFindings] = useState<Finding[]>([]);
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
-  const [activeTab, setActiveTab] = useState<
-    "all" | "cost" | "security" | "logs" | "alerts" | "help"
-  >("all");
-  const [selectedFinding, setSelectedFinding] = useState<any | null>(null);
+  const [activeTab, setActiveTab] = useState<DashboardTab>("all");
+  const [selectedFinding, setSelectedFinding] = useState<Finding | null>(null);
   const [showAwsForm, setShowAwsForm] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
   const [scanningResource, setScanningResource] = useState<string | null>(null);
-  const [actionHistory, setActionHistory] = useState<any[]>([]);
+  const [actionHistory, setActionHistory] = useState<ActionRecord[]>([]);
   const [costTabScanned, setCostTabScanned] = useState(false);
-
-  const [totalSavings, setTotalSavings] = useState(0);
 
   const [tier, setTier] = useState<string>("free");
   const [credits, setCredits] = useState<number>(0);
   const [isPricingModalOpen, setIsPricingModalOpen] = useState(false);
 
-  const [alertConfigs, setAlertConfigs] = useState<any[]>([]);
-  const [triggeredAlerts, setTriggeredAlerts] = useState<any[]>([]);
-  const [newAlert, setNewAlert] = useState({
-    resourceType: "EC2",
-    metric: "cpu",
-    threshold: 10,
-    thresholdType: "below",
-    operator: "<",
-  });
-  const [activeCredentials, setActiveCredentials] = useState<{
-    keyId: string;
-    secretKey: string;
-  } | null>(null);
+  const [alertConfigs, setAlertConfigs] = useState<AlertConfig[]>([]);
+  const [triggeredAlerts, setTriggeredAlerts] = useState<TriggeredAlert[]>([]);
+  const [pendingAlerts, setPendingAlerts] = useState<TriggeredAlert[]>([]);
+
+  // Bumped explicitly instead of keying the loader on `activeTab`, which
+  // refetched the whole profile on every sidebar click.
+  const [dataVersion, setDataVersion] = useState(0);
+  const notifiedAlertIds = useRef(new Set<string>());
 
   useEffect(() => {
-    if (!loading && !user) router.push("/src/login_page");
+    if (!loading && !user) router.replace("/src/login_page");
   }, [user, loading, router]);
 
-  useEffect(() => {
-    if (typeof window !== "undefined" && "Notification" in window) {
-      if (Notification.permission !== "granted" && Notification.permission !== "denied") {
-        Notification.requestPermission();
-      }
-    }
-  }, []);
+  const authHeaders = useCallback(async () => {
+    if (!user) return null;
+    const token = await user.getIdToken();
+    return {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${token}`,
+    };
+  }, [user]);
 
   useEffect(() => {
+    let cancelled = false;
+
     const loadUserData = async () => {
-      if (!user) return;
+      const headers = await authHeaders();
+      if (!headers) return;
 
       try {
-        const token = await user.getIdToken();
-        const headers = {
-          "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
-        };
-
-        const syncPromise = fetch(`${api.baseURL}/api/user/sync`, { method: "POST", headers })
-          .then(res => res.ok ? res.json() : null)
-          .catch(e => devLog("Sync failed:", e));
-
-        const alertsPromise = fetch(api.endpoints.alertsConfig, { headers })
-          .then(res => res.ok ? res.json() : null)
-          .catch(e => null);
-          
-        const logsPromise = fetch(api.endpoints.actionLogs, { headers })
-          .then(res => res.ok ? res.json() : null)
-          .catch(e => null);
-
-        const triggeredPromise = fetch(api.endpoints.alertsTriggered, { headers })
-          .then(res => res.ok ? res.json() : null)
-          .catch(e => null);
-
-        const [syncData, alertsData, logsData, triggeredData] = await Promise.all([
-          syncPromise, alertsPromise, logsPromise, triggeredPromise
+        const [syncRes, alertsRes, logsRes, triggeredRes] = await Promise.all([
+          fetch(api.endpoints.userSync, { method: "POST", headers }).catch(() => null),
+          fetch(api.endpoints.alertsConfig, { headers }).catch(() => null),
+          fetch(api.endpoints.actionLogs, { headers }).catch(() => null),
+          fetch(api.endpoints.alertsTriggered, { headers }).catch(() => null),
         ]);
+        if (cancelled) return;
 
-        if (syncData) {
-          setTier(syncData.tier);
-          setCredits(syncData.credits);
-        }
-        if (alertsData) {
-          setAlertConfigs(alertsData.configs || []);
-        }
-        if (logsData) {
-          const formattedLogs = logsData.logs.map((log: any) => ({
-            id: log.id,
-            resourceId: log.resource_id,
-            action: log.action,
-            type: log.type,
-            timestamp: log.timestamp,
-          }));
-          setActionHistory(formattedLogs);
-        }
-        if (triggeredData) {
-          setTriggeredAlerts(triggeredData.alerts || []);
+        if (syncRes?.ok) {
+          const syncData = await syncRes.json();
+          setTier(syncData.tier ?? "free");
+          setCredits(syncData.credits ?? 0);
+        } else if (syncRes) {
+          setError(
+            await extractErrorMessage(syncRes, "Could not load your profile. Some features may be unavailable."),
+          );
         }
 
+        if (alertsRes?.ok) {
+          const alertsData = await alertsRes.json();
+          setAlertConfigs(alertsData.configs ?? []);
+        }
+
+        if (logsRes?.ok) {
+          const logsData = await logsRes.json();
+          setActionHistory(
+            (logsData.logs ?? []).map((log: Record<string, string>) => ({
+              id: log.id,
+              resourceId: log.resource_id,
+              action: log.action,
+              type: log.type,
+              timestamp: log.timestamp,
+            })),
+          );
+        }
+
+        if (triggeredRes?.ok) {
+          const triggeredData = await triggeredRes.json();
+          setTriggeredAlerts(triggeredData.alerts ?? []);
+        }
       } catch (err) {
-        devError("Failed to load user data:", err);
+        if (!cancelled) devError("Failed to load user data:", err);
       }
     };
 
     loadUserData();
-  }, [user, activeTab]); 
+    return () => {
+      cancelled = true;
+    };
+  }, [authHeaders, dataVersion]);
 
+  const activeFindings = useMemo(
+    () => findings.filter((f) => !dismissed.has(f.uid)),
+    [findings, dismissed],
+  );
+
+  const totalSavings = useMemo(() => sumSavings(activeFindings), [activeFindings]);
+
+  /**
+   * Alerts the client evaluated locally, merged with the server's history.
+   *
+   * The worker result used to replace `triggeredAlerts` outright, which wiped
+   * the persisted history from `/api/alerts/triggered` and left the Alerts tab
+   * empty whenever there were no current findings.
+   */
+  const visibleAlerts = useMemo(() => {
+    // Locally evaluated alerts only apply while there are findings and
+    // thresholds to compare them against.
+    const localAlerts =
+      findings.length > 0 && alertConfigs.length > 0 ? pendingAlerts : [];
+    const seen = new Set(triggeredAlerts.map((a) => `${a.configId}-${a.resourceId}`));
+    const merged = [...triggeredAlerts];
+    localAlerts.forEach((alert) => {
+      const key = `${alert.configId}-${alert.resourceId}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        merged.push(alert);
+      }
+    });
+    return merged;
+  }, [triggeredAlerts, pendingAlerts, findings.length, alertConfigs.length]);
+
+  // Read inside the worker effect without making `dismissed` a dependency,
+  // which would re-run the evaluation on every dismissal.
+  const dismissedRef = useRef(dismissed);
   useEffect(() => {
-    const activeFindings = findings.filter((f) => !dismissed.has(f.id));
+    dismissedRef.current = dismissed;
+  }, [dismissed]);
 
-    const savings = activeFindings.reduce((acc, curr) => {
-      const cleanNumericString = curr.save.replace(/[^0-9.]/g, "");
-      const parsedValue = parseFloat(cleanNumericString) || 0;
-      return acc + parsedValue;
-    }, 0);
-
-    setTotalSavings(Number(savings.toFixed(2)));
-  }, [findings, dismissed]);
+  // Evaluate alerts when the findings or the thresholds change -- deliberately
+  // not when a row is dismissed, which used to re-post to the backend and add
+  // duplicate history rows on every click.
   useEffect(() => {
-    if (alertConfigs.length === 0 || findings.length === 0) {
-      setTriggeredAlerts([]);
-      return;
-    }
+    if (alertConfigs.length === 0 || findings.length === 0) return;
 
-    const worker = new Worker(
-      new URL("../../workers/alertWorker.ts", import.meta.url),
-    );
+    const worker = new Worker(new URL("../../workers/alertWorker.ts", import.meta.url));
 
     worker.onmessage = (event) => {
-      setTriggeredAlerts((prevAlerts) => {
-        const newAlerts = event.data;
-        newAlerts.forEach((alert: any) => {
-          if (!prevAlerts.find((pa: any) => pa.id === alert.id)) {
-            if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
-              new Notification("Tuff Alert Triggered", {
-                body: `Resource ${alert.resourceId} (${alert.resourceType}) triggered ${alert.metric} alert!`,
-                icon: "/favicon.ico"
-              });
-            }
-          }
-        });
-        return newAlerts;
+      const newAlerts: TriggeredAlert[] = event.data ?? [];
+      setPendingAlerts(newAlerts);
+
+      newAlerts.forEach((alert) => {
+        const key = String(alert.id);
+        if (notifiedAlertIds.current.has(key)) return;
+        notifiedAlertIds.current.add(key);
+
+        if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "granted") {
+          new Notification("Tuff alert triggered", {
+            body: `${alert.resourceId} (${alert.resourceType}) crossed your ${alert.metric} threshold.`,
+            icon: "/favicon.ico",
+          });
+        }
       });
     };
 
     worker.postMessage({
       alertConfigs,
       findings,
-      dismissedList: Array.from(dismissed),
+      dismissedList: Array.from(dismissedRef.current),
     });
 
-    if (user) {
-      const evaluateAlertsBackend = async () => {
-        try {
-          const token = await user.getIdToken();
-          const headers = {
-            "Content-Type": "application/json",
-            "Authorization": `Bearer ${token}`,
-          };
-          fetch(api.endpoints.alertsEvaluate, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              findings: findings,
-              alertConfigs: alertConfigs,
-            }),
-          }).catch((err) => devLog("Backend alert evaluation optional:", err));
-        } catch (err) {
-          devLog("Backend connection not available", err);
+    const evaluateOnServer = async () => {
+      const headers = await authHeaders();
+      if (!headers) return;
+      try {
+        // Only the findings are sent: the backend reads the thresholds from the
+        // database so a client cannot evaluate against someone else's alerts.
+        const res = await fetch(api.endpoints.alertsEvaluate, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ findings }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.alerts?.length) {
+            setTriggeredAlerts((prev) => [...data.alerts, ...prev]);
+          }
         }
-      };
-      evaluateAlertsBackend();
-    }
-
-    return () => {
-      worker.terminate();
+      } catch (err) {
+        devLog("Backend alert evaluation unavailable:", err);
+      }
     };
-  }, [findings, alertConfigs, dismissed, user]);
+    evaluateOnServer();
 
-  if (loading || !user) {
-    return (
-      <div className={styles.loadingContainer}>
-        LOADING SECURE OPERATIONS CELL...
-      </div>
-    );
-  }
+    return () => worker.terminate();
+  }, [findings, alertConfigs, authHeaders]);
 
-  const handleScanSuccess = (
-    liveData: any[],
-    credentials?: { keyId: string; secretKey: string },
+  useEffect(() => {
+    if (!notice) return;
+    const timer = setTimeout(() => setNotice(null), 6000);
+    return () => clearTimeout(timer);
+  }, [notice]);
+
+  const handleScanSuccess = useCallback(
+    (liveData: Finding[], credentials?: { region: string }) => {
+      setFindings(liveData);
+      if (credentials?.region) setPreferredRegion(credentials.region);
+      setApproved(new Set());
+      setDismissed(new Set());
+      setSelectedFinding(liveData.length > 0 ? liveData[0] : null);
+      setCostTabScanned(true);
+      setShowAwsForm(false);
+      setNotice(
+        liveData.length > 0
+          ? `Scan complete — ${liveData.length} finding(s) need review.`
+          : "Scan complete — no waste or exposure detected.",
+      );
+    },
+    [],
+  );
+
+  const handleApprove = async (
+    uid: string,
+    actionTypeOverride?: string,
+    targetTypeOverride?: string,
   ) => {
-    setFindings(liveData);
-    if (credentials) setActiveCredentials(credentials);
-    if (liveData.length > 0) setSelectedFinding(liveData[0]);
-    setCostTabScanned(true);
-    setShowAwsForm(false);
-  };
-
-  const handleScanError = (errorMsg: string) => {
-    setError(errorMsg);
-    setScanningResource(null);
-  };
-
-  const handleApprove = async (id: string, actionTypeOverride?: string, targetTypeOverride?: string) => {
-    const targetFinding = findings.find((f) => f.id === id);
+    const targetFinding = findings.find((f) => f.uid === uid);
     if (!targetFinding) return;
-    if (!user) {
-      setError("User not authenticated");
+
+    const headers = await authHeaders();
+    if (!headers || !user) {
+      setError("Your session expired. Please sign in again.");
       return;
     }
 
-    let actionType = actionTypeOverride || "stop_instance";
-    if (!actionTypeOverride) {
-      if (targetFinding.type.includes("Volume")) {
-        actionType = "delete_volume";
-      } else if (targetFinding.type.includes("S3")) {
-        actionType = "secure_s3";
-      } else if (targetFinding.type.includes("Scaling")) {
-        actionType = "scale_instance";
-      } else if (targetFinding.type.includes("RDS")) {
-        actionType = "stop_rds";
-      } else if (targetFinding.type.includes("VPC")) {
-        actionType = "delete_vpc";
-      }
+    // Credentials are read from the encrypted session store rather than from
+    // component state, so remediation keeps working after a page reload
+    // instead of silently sending placeholder keys to AWS.
+    const stored = loadEncryptedCredentials(user.uid);
+    if (!stored) {
+      setError("Connect your AWS account before approving an action.");
+      setShowAwsForm(true);
+      return;
     }
 
+    const actionType = actionTypeOverride || defaultActionFor(targetFinding);
+    setError(null);
+    setApproved((prev) => new Set(prev).add(uid));
+
+    const revertApproval = () =>
+      setApproved((prev) => {
+        const next = new Set(prev);
+        next.delete(uid);
+        return next;
+      });
+
     try {
-      const keyToSend = activeCredentials?.keyId || "demo";
-      const secretToSend = activeCredentials?.secretKey || "12345";
-      setError(null);
-      setApproved((prev) => new Set(prev).add(id));
-
-      const token = await user.getIdToken();
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      };
-
       const response = await fetch(api.endpoints.execute, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          aws_access_key: keyToSend,
-          aws_secret_key: secretToSend,
+          aws_access_key: stored.accessKey,
+          aws_secret_key: stored.secretKey,
           region:
-            targetFinding.region === "global"
-              ? "us-east-1"
-              : targetFinding.region,
-          resource_id: id,
+            targetFinding.region && targetFinding.region !== "global"
+              ? targetFinding.region
+              : stored.region || getPreferredRegion(),
+          resource_id: targetFinding.id,
           action_type: actionType,
-          target_type: targetTypeOverride || targetFinding.metrics?.suggested_type || "t3.micro",
-          user_id: user.email,
+          target_type:
+            actionType === "scale_instance"
+              ? targetTypeOverride || targetFinding.metrics?.suggested_type || "t3.micro"
+              : undefined,
         }),
       });
 
-      if (response.ok) {
-        try {
-          const res = await fetch(api.endpoints.actionLogs, {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              user_id: user.email,
-              resource_id: id,
-              action: "Approved",
-              resource_type: targetFinding.type,
-            }),
-          });
-          if (res.ok) {
-            const data = await res.json();
-            const logEntry = {
+      if (!response.ok) {
+        setError(await extractErrorMessage(response, "Failed to execute that action."));
+        revertApproval();
+        return;
+      }
+
+      const result = await response.json();
+      setNotice(result.message || "Action completed.");
+
+      try {
+        const res = await fetch(api.endpoints.actionLogs, {
+          method: "POST",
+          headers,
+          body: JSON.stringify({
+            resource_id: targetFinding.id,
+            action: "Approved",
+            resource_type: targetFinding.type,
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          setActionHistory((prev) => [
+            {
               id: data.log_id,
-              resourceId: id,
+              resourceId: targetFinding.id,
               action: "Approved",
               type: targetFinding.type,
               timestamp: data.timestamp,
-            };
-            setActionHistory((prev) => [logEntry, ...prev]);
-          }
-        } catch (err) {
-          devLog("Backend connection not available");
+            },
+            ...prev,
+          ]);
         }
-
-        setTimeout(() => {
-          setDismissed((prev) => new Set(prev).add(id));
-          if (selectedFinding?.id === id) setSelectedFinding(null);
-        }, 600);
-      } else {
-        const errData = await response.json();
-        setError(errData.detail || "Failed to execute action");
-        setApproved((prev) => {
-          const newSet = new Set(prev);
-          newSet.delete(id);
-          return newSet;
-        });
+      } catch {
+        devLog("Could not record the action log entry");
       }
+
+      setDismissed((prev) => new Set(prev).add(uid));
+      setSelectedFinding((prev) => (prev?.uid === uid ? null : prev));
     } catch (err) {
-      const errorMsg =
-        err instanceof Error ? err.message : "An unexpected error occurred";
-      setError(errorMsg);
-      setApproved((prev) => {
-        const newSet = new Set(prev);
-        newSet.delete(id);
-        return newSet;
-      });
+      devError("Remediation request failed", err);
+      setError(networkErrorMessage());
+      revertApproval();
     }
   };
 
   const handleScanResourceType = async (resourceType: string, regionOverride?: string) => {
+    const headers = await authHeaders();
+    if (!headers || !user) {
+      setError("Your session expired. Please sign in again.");
+      return;
+    }
+
+    const stored = loadEncryptedCredentials(user.uid);
+    if (!stored) {
+      setError("Connect your AWS account first, then run a scan.");
+      setShowAwsForm(true);
+      return;
+    }
+
     setScanningResource(resourceType);
     setError(null);
 
-    let keyId = activeCredentials?.keyId;
-    let secretKey = activeCredentials?.secretKey;
-    let targetRegion = regionOverride || "";
-    const saved = localStorage.getItem("aws_credentials");
-    if (saved) {
-      try {
-        const parsed = JSON.parse(saved);
-        keyId = keyId || parsed.accessKey;
-        secretKey = secretKey || parsed.secretKey;
-        if (!targetRegion) targetRegion = parsed.region;
-      } catch (e) {
-        console.error("Failed to parse saved credentials:", e);
-      }
-    }
-    if (!targetRegion) {
-      targetRegion =
-        findings.length > 0 && findings[0].region !== "global"
-          ? findings[0].region
-          : "us-east-1";
-    }
+    const targetRegion = regionOverride || stored.region || getPreferredRegion();
 
     try {
-      const token = await user.getIdToken();
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      };
-
       const response = await fetch(api.endpoints.analyze, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          aws_access_key: keyId || "demo",
-          aws_secret_key: secretKey || "12345",
+          aws_access_key: stored.accessKey,
+          aws_secret_key: stored.secretKey,
           region: targetRegion,
         }),
       });
 
-      if (response.ok) {
-        const data = await response.json();
-        if (data.data && Array.isArray(data.data)) {
-          if (resourceType === "all") {
-            handleScanSuccess(data.data);
-          } else {
-            const filtered = data.data.filter((f: any) =>
-              f.type.toLowerCase().includes(resourceType.toLowerCase()),
-            );
-            handleScanSuccess(filtered.length > 0 ? filtered : data.data);
-          }
-          setCostTabScanned(true);
-        } else {
-          handleScanError("Invalid response format from server");
+      if (!response.ok) {
+        if (response.status === 429 || response.status === 402) {
+          setIsPricingModalOpen(true);
+          return;
         }
-      } else {
-        const errData = await response.json();
-        handleScanError(
-          errData.detail || `Failed to scan ${resourceType} resources`,
+        setError(await extractErrorMessage(response, `Failed to scan ${resourceType} resources.`));
+        return;
+      }
+
+      const data = await response.json();
+      if (!Array.isArray(data?.data)) {
+        setError("The server returned an unexpected response.");
+        return;
+      }
+
+      if (typeof data.credits_remaining === "number") setCredits(data.credits_remaining);
+
+      const all: Finding[] = data.data;
+      if (resourceType === "all") {
+        handleScanSuccess(all, { region: targetRegion });
+        return;
+      }
+
+      const filtered = all.filter((f) =>
+        f.type.toLowerCase().includes(resourceType.toLowerCase()),
+      );
+      handleScanSuccess(filtered, { region: targetRegion });
+      if (filtered.length === 0 && all.length > 0) {
+        // Previously the full result set was substituted here, which silently
+        // showed unrelated resources under a specific resource filter.
+        setNotice(
+          `No ${resourceType} findings. Tuff found ${all.length} finding(s) in other resource types — switch to "All Resources" to see them.`,
         );
       }
     } catch (err) {
-      const errorMsg =
-        err instanceof Error ? err.message : "An unexpected error occurred";
-      handleScanError(errorMsg);
+      devError("Scan request failed", err);
+      setError(networkErrorMessage());
     } finally {
       setScanningResource(null);
     }
   };
 
-  const handleAddAlert = async (alertData: Omit<any, "id">) => {
-    if (!alertData.threshold) {
-      setError("Please set a threshold value");
+  const handleAddAlert = async (alertData: Omit<AlertConfig, "id">) => {
+    const headers = await authHeaders();
+    if (!headers) {
+      setError("Your session expired. Please sign in again.");
       return;
     }
-    if (!user) {
-      setError("User not authenticated");
+
+    if (!Number.isFinite(alertData.threshold)) {
+      setError("Please enter a numeric threshold value.");
       return;
     }
 
     try {
-      const token = await user.getIdToken();
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      };
       const res = await fetch(api.endpoints.alertsConfig, {
         method: "POST",
         headers,
-        body: JSON.stringify({
-          ...alertData,
-          user_id: user.email,
-        }),
+        body: JSON.stringify(alertData),
       });
-      if (res.ok) {
-        const data = await res.json();
-        const alert = {
-          id: data.alert.id,
-          ...alertData,
-        };
-        setAlertConfigs((prev) => [...prev, alert]);
-      } else {
-        const errData = await res.json();
-        setError(errData.detail || "Failed to save alert");
+
+      if (!res.ok) {
+        setError(await extractErrorMessage(res, "Failed to save the alert."));
         return;
       }
-    } catch (err) {
-      devLog("Backend connection not available");
-    }
 
-    setNewAlert({
-      resourceType: "EC2",
-      metric: "cpu",
-      threshold: 10,
-      thresholdType: "below",
-      operator: "<",
-    });
-    setError(null);
+      const data = await res.json();
+      setAlertConfigs((prev) => [{ ...alertData, id: data.alert.id }, ...prev]);
+      setError(null);
+      setNotice("Alert created.");
+
+      // Asked here, in response to a deliberate action, rather than on page
+      // load where browsers ignore or penalise the prompt.
+      if (typeof window !== "undefined" && "Notification" in window && Notification.permission === "default") {
+        Notification.requestPermission().catch(() => undefined);
+      }
+    } catch (err) {
+      devError("Alert creation failed", err);
+      setError(networkErrorMessage());
+    }
   };
 
   const handleRemoveAlert = async (alertId: string) => {
+    const previous = alertConfigs;
     setAlertConfigs((prev) => prev.filter((a) => a.id !== alertId));
 
-    if (!user) return;
+    const headers = await authHeaders();
+    if (!headers) return;
 
     try {
-      const token = await user.getIdToken();
-      const headers = {
-        "Authorization": `Bearer ${token}`,
-      };
-      await fetch(`${api.endpoints.alertsConfig}/${alertId}`, {
+      const res = await fetch(`${api.endpoints.alertsConfig}/${alertId}`, {
         method: "DELETE",
         headers,
       });
+      if (!res.ok) {
+        // Put the row back rather than leaving the UI out of step with the server.
+        setAlertConfigs(previous);
+        setError(await extractErrorMessage(res, "Could not remove that alert."));
+      }
     } catch (err) {
-      devLog("Backend connection not available");
+      setAlertConfigs(previous);
+      devError("Alert removal failed", err);
+      setError(networkErrorMessage());
     }
   };
 
-  const handleDismissWithHistory = async (id: string, finding: any) => {
-    if (!user) {
-      setError("User not authenticated");
-      return;
-    }
+  const handleDismissWithHistory = async (uid: string, finding: Finding) => {
+    setDismissed((prev) => new Set(prev).add(uid));
+    setSelectedFinding((prev) => (prev?.uid === uid ? null : prev));
 
-    setDismissed((prev) => new Set(prev).add(id));
-    if (selectedFinding?.id === id) setSelectedFinding(null);
+    const headers = await authHeaders();
+    if (!headers) return;
 
     try {
-      const token = await user.getIdToken();
-      const headers = {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${token}`,
-      };
       const res = await fetch(api.endpoints.actionLogs, {
         method: "POST",
         headers,
         body: JSON.stringify({
-          user_id: user.email,
-          resource_id: id,
+          resource_id: finding.id,
           action: "Dismissed",
           resource_type: finding.type,
         }),
       });
       if (res.ok) {
         const data = await res.json();
-        const logEntry = {
-          id: data.log_id,
-          resourceId: id,
-          action: "Dismissed",
-          type: finding.type,
-          timestamp: data.timestamp,
-        };
-        setActionHistory((prev) => [logEntry, ...prev]);
+        setActionHistory((prev) => [
+          {
+            id: data.log_id,
+            resourceId: finding.id,
+            action: "Dismissed",
+            type: finding.type,
+            timestamp: data.timestamp,
+          },
+          ...prev,
+        ]);
       }
-    } catch (err) {
-      devLog("Backend connection not available");
+    } catch {
+      devLog("Could not record the dismissal");
     }
   };
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      router.replace("/src/login_page");
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Could not sign out.");
+    }
+  };
+
+  const handleStartScan = () => {
+    if (!user || !loadEncryptedCredentials(user.uid)) {
+      setError("AWS credentials are not configured for this session. Connect your account first.");
+      setShowAwsForm(true);
+      return;
+    }
+    setActiveTab("cost");
+    setCostTabScanned(false);
+  };
+
+  if (loading || !user) {
+    return (
+      <div className={styles.loadingContainer} role="status" aria-live="polite">
+        Loading your secure operations console…
+      </div>
+    );
+  }
+
+  const navItems: Array<{ tab: DashboardTab; label: string; icon: React.ReactNode }> = [
+    { tab: "all", label: "Overview", icon: <Home size={18} /> },
+    { tab: "cost", label: "Cost Explorer", icon: <Wallet size={18} /> },
+    { tab: "security", label: "Security", icon: <ShieldAlert size={18} /> },
+    { tab: "logs", label: "Logs", icon: <BarChart3 size={18} /> },
+    { tab: "alerts", label: "Alerts", icon: <Bell size={18} /> },
+  ];
+
+  const showStats = activeTab === "all" || activeTab === "security";
 
   return (
     <div className={styles.dashboardLayout}>
       <aside className={styles.sidebar}>
         <div className={styles.sidebarLogo}>
           <span className={styles.logoText}>Tuff</span>
-          <span className={styles.logoSubtext}>// console</span>
+          <span className={styles.logoSubtext}>{"// console"}</span>
         </div>
 
-        <nav className={styles.navLinks}>
-          <button
-            className={`${styles.navItem} ${activeTab === "all" ? styles.active : ""}`}
-            onClick={() => setActiveTab("all")}
-          >
-            <Home size={18} />
-            <span>Overview</span>
-          </button>
-
-          <button
-            className={`${styles.navItem} ${activeTab === "cost" ? styles.active : ""}`}
-            onClick={() => setActiveTab("cost")}
-          >
-            <Wallet size={18} />
-            <span>Cost Explorer</span>
-          </button>
-
-          <button
-            className={`${styles.navItem} ${activeTab === "logs" ? styles.active : ""}`}
-            onClick={() => setActiveTab("logs")}
-          >
-            <BarChart3 size={18} />
-            <span>Logs</span>
-          </button>
-
-          <button
-            className={`${styles.navItem} ${activeTab === "alerts" ? styles.active : ""}`}
-            onClick={() => setActiveTab("alerts")}
-          >
-            <Bell size={18} />
-            <span>Alerts</span>
-          </button>
+        <nav className={styles.navLinks} aria-label="Dashboard sections">
+          {navItems.map((item) => (
+            <button
+              key={item.tab}
+              type="button"
+              className={
+                activeTab === item.tab
+                  ? `${styles.navItem} ${styles.navItemActive}`
+                  : styles.navItem
+              }
+              onClick={() => setActiveTab(item.tab)}
+              aria-current={activeTab === item.tab ? "page" : undefined}
+            >
+              {item.icon}
+              <span>{item.label}</span>
+            </button>
+          ))}
         </nav>
 
-        <div className={styles.sidebarBottom}>
-          <button
-            className={styles.navItem}
-            onClick={() => {
-              const saved = localStorage.getItem("aws_credentials");
-              if (!saved) {
-                setError(
-                  "AWS credentials not configured. Please connect your AWS account first.",
-                );
-                setShowAwsForm(true);
-              } else {
-                setActiveTab("cost");
-                setCostTabScanned(false);
-                handleScanResourceType("all");
-              }
-            }}
-          >
+        <div className={styles.sidebarActions}>
+          <button type="button" className={styles.navItem} onClick={handleStartScan}>
             <FileText size={18} />
             <span>Scan Resources</span>
           </button>
 
           <button
+            type="button"
             className={styles.connectAwsBtn}
-            onClick={() => setShowAwsForm(!showAwsForm)}
+            onClick={() => setShowAwsForm((prev) => !prev)}
+            aria-expanded={showAwsForm}
           >
             <Wallet size={18} />
-            <span>Connect AWS Account</span>
+            <span>{showAwsForm ? "Hide AWS Settings" : "Connect AWS Account"}</span>
           </button>
 
-          <button 
-            className={`${styles.navItem} ${activeTab === "help" ? styles.active : ""}`}
+          <button
+            type="button"
+            className={
+              activeTab === "help"
+                ? `${styles.navItem} ${styles.navItemActive}`
+                : styles.navItem
+            }
             onClick={() => setActiveTab("help")}
           >
             <HelpCircle size={18} />
             <span>Help</span>
           </button>
 
-          <button onClick={logout} className={styles.logoutItem}>
+          <button type="button" onClick={handleLogout} className={styles.logoutItem}>
             <LogOut size={18} />
             <span>Logout</span>
           </button>
+        </div>
 
-          <div className={styles.userCard}>
-            <div className={styles.avatar}>
-              {user?.email?.[0]?.toUpperCase()}
-            </div>
-            <div>
-              <h4>{user?.email?.split("@")[0]}</h4>
-              <p>{user?.email}</p>
-            </div>
+        <div className={styles.userCard}>
+          <div className={styles.avatar}>{user.email?.[0]?.toUpperCase() ?? "?"}</div>
+          <div className={styles.userMeta}>
+            <h4>{user.email?.split("@")[0]}</h4>
+            <p>{user.email}</p>
           </div>
         </div>
       </aside>
 
       <main className={styles.mainContent}>
         <div className={styles.topbar}>
-          <h1>
-            {activeTab === "all" && "Cloud Resource Overview"}
-            {activeTab === "cost" && "Cost Explorer"}
-            {activeTab === "logs" && "Previous Actions & Logs"}
-            {activeTab === "alerts" && "Alert Configuration & History"}
-            {activeTab === "help" && "Help & Documentation"}
-          </h1>
+          <h1>{TAB_TITLES[activeTab]}</h1>
           <div className={styles.topbarRight}>
             <div className="flex items-center gap-3 mr-4">
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', padding: '6px 12px', borderRadius: '20px', border: '1px solid rgba(139, 115, 85, 0.3)', background: 'rgba(139, 115, 85, 0.05)' }}>
-                <div style={{ width: '8px', height: '8px', borderRadius: '50%', backgroundColor: tier === 'pro' ? '#8b7355' : 'rgba(139, 115, 85, 0.4)', boxShadow: tier === 'pro' ? '0 0 8px rgba(139, 115, 85, 0.6)' : 'none' }}></div>
-                <span style={{ fontSize: '13px', fontWeight: 500, color: '#8b7355', textTransform: 'capitalize', fontFamily: 'Jost, sans-serif' }}>{tier} Plan</span>
-                <span style={{ fontSize: '11px', color: '#8b7355', background: 'rgba(139, 115, 85, 0.1)', padding: '2px 8px', borderRadius: '12px', marginLeft: '4px', fontFamily: 'Jost, sans-serif' }}>{credits} Credits</span>
+              <div
+                title={`${credits} AI credits remaining`}
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                  padding: "6px 12px",
+                  borderRadius: "20px",
+                  border: "1px solid rgba(139, 115, 85, 0.3)",
+                  background: "rgba(139, 115, 85, 0.05)",
+                }}
+              >
+                <div
+                  style={{
+                    width: "8px",
+                    height: "8px",
+                    borderRadius: "50%",
+                    backgroundColor: tier === "pro" ? "#8b7355" : "rgba(139, 115, 85, 0.4)",
+                    boxShadow: tier === "pro" ? "0 0 8px rgba(139, 115, 85, 0.6)" : "none",
+                  }}
+                />
+                <span
+                  style={{
+                    fontSize: "13px",
+                    fontWeight: 500,
+                    color: "#8b7355",
+                    textTransform: "capitalize",
+                    fontFamily: "Jost, sans-serif",
+                  }}
+                >
+                  {tier} Plan
+                </span>
+                <span
+                  style={{
+                    fontSize: "11px",
+                    color: "#8b7355",
+                    background: "rgba(139, 115, 85, 0.1)",
+                    padding: "2px 8px",
+                    borderRadius: "12px",
+                    marginLeft: "4px",
+                    fontFamily: "Jost, sans-serif",
+                  }}
+                >
+                  {credits.toLocaleString()} Credits
+                </span>
               </div>
-              {tier !== 'pro' && (
-                <button 
+              {tier !== "pro" && (
+                <button
                   onClick={() => setIsPricingModalOpen(true)}
                   style={{
-                    background: 'linear-gradient(135deg, rgba(139, 115, 85, 0.9), rgba(110, 90, 65, 0.9))',
-                    color: '#fff',
-                    border: 'none',
-                    padding: '8px 16px',
-                    borderRadius: '20px',
-                    fontSize: '13px',
+                    background: "linear-gradient(135deg, rgba(139, 115, 85, 0.9), rgba(110, 90, 65, 0.9))",
+                    color: "#fff",
+                    border: "none",
+                    padding: "8px 16px",
+                    borderRadius: "20px",
+                    fontSize: "13px",
                     fontWeight: 600,
-                    fontFamily: 'Jost, sans-serif',
-                    cursor: 'pointer',
-                    boxShadow: '0 4px 12px rgba(139, 115, 85, 0.2)',
-                    transition: 'all 0.2s ease',
-                    letterSpacing: '0.05em',
-                    textTransform: 'uppercase'
+                    fontFamily: "Jost, sans-serif",
+                    cursor: "pointer",
+                    boxShadow: "0 4px 12px rgba(139, 115, 85, 0.2)",
+                    transition: "all 0.2s ease",
+                    letterSpacing: "0.05em",
+                    textTransform: "uppercase",
                   }}
-                  onMouseOver={(e) => e.currentTarget.style.transform = 'translateY(-1px)'}
-                  onMouseOut={(e) => e.currentTarget.style.transform = 'translateY(0)'}
+                  onMouseOver={(e) => (e.currentTarget.style.transform = "translateY(-1px)")}
+                  onMouseOut={(e) => (e.currentTarget.style.transform = "translateY(0)")}
                 >
                   Upgrade
                 </button>
               )}
             </div>
-            <button className={styles.dateBtn}>
-              {new Date().toLocaleDateString()}
-            </button>
           </div>
         </div>
 
         {error && (
-          <div className={styles.errorBanner}>
+          <div className={styles.errorBanner} role="alert">
             <div className={styles.errorContent}>
               <span className={styles.errorIcon}>⚠</span>
               <span className={styles.errorMessage}>{error}</span>
             </div>
+            <button className={styles.errorClose} onClick={() => setError(null)} aria-label="Dismiss error">
+              ✕
+            </button>
+          </div>
+        )}
+
+        {notice && (
+          <div
+            role="status"
+            aria-live="polite"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+              gap: "12px",
+              margin: "0 0 20px",
+              padding: "12px 16px",
+              borderRadius: "8px",
+              background: "rgba(100, 140, 80, 0.1)",
+              border: "1px solid rgba(100, 140, 80, 0.35)",
+              color: "#41632f",
+              fontFamily: "Jost, sans-serif",
+              fontSize: "14px",
+            }}
+          >
+            <span>{notice}</span>
             <button
-              className={styles.errorClose}
-              onClick={() => setError(null)}
-              aria-label="Dismiss error"
+              onClick={() => setNotice(null)}
+              aria-label="Dismiss message"
+              style={{ background: "none", border: "none", cursor: "pointer", color: "#41632f", fontSize: "14px" }}
             >
               ✕
             </button>
           </div>
         )}
 
-        {activeTab !== "cost" &&
-          activeTab !== "logs" &&
-          activeTab !== "alerts" &&
-          activeTab !== "help" && (
-            <StatsPanel
-              findings={findings}
-              dismissed={dismissed}
-              totalSavings={totalSavings}
-              approved={approved}
-              alertConfigs={alertConfigs}
-              triggeredAlerts={triggeredAlerts}
-              onAlertTabClick={() => setActiveTab("alerts")}
-            />
-          )}
+        {showStats && (
+          <StatsPanel
+            findings={findings}
+            dismissed={dismissed}
+            totalSavings={totalSavings}
+            approved={approved}
+            alertConfigs={alertConfigs}
+            triggeredAlerts={visibleAlerts}
+            onAlertTabClick={() => setActiveTab("alerts")}
+          />
+        )}
 
         {activeTab === "cost" && !costTabScanned && (
           <ResourceScanner
@@ -700,16 +808,14 @@ export default function MainPage() {
           <div className={styles.largeCard}>
             <div className={styles.cardHeader}>
               <h3>Connect AWS Account</h3>
-              <button
-                className={styles.closeBtn}
-                onClick={() => setShowAwsForm(false)}
-              >
+              <button className={styles.closeBtn} onClick={() => setShowAwsForm(false)} aria-label="Close">
                 ✕
               </button>
             </div>
-            <AwsConnectForm 
-              onScanComplete={handleScanSuccess} 
+            <AwsConnectForm
+              onScanComplete={handleScanSuccess}
               onTokenLimit={() => setIsPricingModalOpen(true)}
+              onCreditsChange={setCredits}
             />
           </div>
         )}
@@ -722,7 +828,7 @@ export default function MainPage() {
           ) : activeTab === "alerts" ? (
             <AlertsPanel
               alertConfigs={alertConfigs}
-              triggeredAlerts={triggeredAlerts}
+              triggeredAlerts={visibleAlerts}
               onAddAlert={handleAddAlert}
               onRemoveAlert={handleRemoveAlert}
             />
@@ -739,17 +845,21 @@ export default function MainPage() {
                 onDismiss={handleDismissWithHistory}
                 setActiveTab={setActiveTab}
                 onScanAgain={() => setCostTabScanned(false)}
+                onUpgradeClick={() => setIsPricingModalOpen(true)}
               />
             )
           )}
         </div>
       </main>
+
       <PricingModal
         isOpen={isPricingModalOpen}
         onClose={() => setIsPricingModalOpen(false)}
         onSuccess={(newCredits, newTier) => {
           setCredits(newCredits);
           setTier(newTier);
+          setNotice("You're on Tuff Pro. Enjoy your extra AI credits.");
+          setDataVersion((v) => v + 1);
         }}
       />
     </div>

@@ -4,12 +4,73 @@ import { useEffect, useRef, useState } from 'react';
 import Link from 'next/link';
 import './index.css';
 
+interface DemoFinding {
+  id: string;
+  type: string;
+  inst: string;
+  cpu: string;
+  cur: string;
+  save: string;
+  region: string;
+  cpuWarn: boolean;
+}
+
+/**
+ * Illustrative rows for the marketing page.
+ *
+ * Held as a module constant rather than pushed into state from an effect,
+ * which caused an extra render pass on every visit for data that never changes.
+ */
+const DEMO_FINDINGS: DemoFinding[] = [
+  {
+    id: 'i-0a1b2c3d4e',
+    type: 'Over-provisioned EC2',
+    inst: 'c5.2xlarge',
+    cpu: '3.2%',
+    cur: '$248/mo',
+    save: '$174/mo',
+    region: 'us-east-1',
+    cpuWarn: false,
+  },
+  {
+    id: 'i-5f6a7b8c9d',
+    type: 'Zombie EBS Volume',
+    inst: 'gp3 500GB',
+    cpu: '0%',
+    cur: '$40/mo',
+    save: '$40/mo',
+    region: 'eu-west-1',
+    cpuWarn: true,
+  },
+  {
+    id: 'i-eab12cd34e',
+    type: 'Idle RDS Instance',
+    inst: 'db.r5.xlarge',
+    cpu: '1.1%',
+    cur: '$380/mo',
+    save: '$285/mo',
+    region: 'us-west-2',
+    cpuWarn: false,
+  },
+  {
+    id: 'i-f0g1h2i3j4',
+    type: 'Over-provisioned EC2',
+    inst: 'm5.4xlarge',
+    cpu: '6.8%',
+    cur: '$560/mo',
+    save: '$420/mo',
+    region: 'ap-se-1',
+    cpuWarn: false,
+  },
+];
+
+const GRAIN_TILE_SIZE = 128;
+
 export default function LandingPage() {
   const grainCanvasRef = useRef<HTMLCanvasElement>(null);
   const savingsCountRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<HTMLDivElement>(null);
   const navRef = useRef<HTMLElement>(null);
-  const [findings, setFindings] = useState<any[]>([]);
   const [approved, setApproved] = useState(new Set<string>());
   const [dismissed, setDismissed] = useState(new Set<string>());
   const [isScrolled, setIsScrolled] = useState(false);
@@ -20,66 +81,114 @@ export default function LandingPage() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    let w = (canvas.width = window.innerWidth);
-    let h = (canvas.height = window.innerHeight);
-    let frame = 0;
+    // Honour the OS "reduce motion" setting: a permanently animating grain
+    // overlay is exactly the kind of effect that setting exists to stop.
+    const prefersReducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+    // The noise is generated into a small offscreen tile and tiled across the
+    // viewport. The previous version allocated a full-viewport ImageData and
+    // filled ~8 million bytes by hand on every animation frame.
+    const tile = document.createElement('canvas');
+    tile.width = GRAIN_TILE_SIZE;
+    tile.height = GRAIN_TILE_SIZE;
+    const tileCtx = tile.getContext('2d');
+    if (!tileCtx) return;
+
+    let cancelled = false;
+    let rafId = 0;
+    let timeoutId: ReturnType<typeof setTimeout> | undefined;
 
     const resize = () => {
-      w = canvas.width = window.innerWidth;
-      h = canvas.height = window.innerHeight;
+      canvas.width = window.innerWidth;
+      canvas.height = window.innerHeight;
     };
+    resize();
     window.addEventListener('resize', resize);
 
-    const drawGrain = () => {
-      const imageData = ctx.createImageData(w, h);
+    const renderTile = () => {
+      const imageData = tileCtx.createImageData(GRAIN_TILE_SIZE, GRAIN_TILE_SIZE);
       const data = imageData.data;
       for (let i = 0; i < data.length; i += 4) {
         const v = (Math.random() * 255) | 0;
         data[i] = data[i + 1] = data[i + 2] = v;
-        data[i + 3] = 18 + (Math.random() * 18);
+        data[i + 3] = 18 + Math.random() * 18;
       }
-      ctx.putImageData(imageData, 0, 0);
-      frame++;
-      if (frame % 3 === 0) requestAnimationFrame(drawGrain);
-      else setTimeout(() => requestAnimationFrame(drawGrain), 50);
+      tileCtx.putImageData(imageData, 0, 0);
     };
-    drawGrain();
-    return () => window.removeEventListener('resize', resize);
+
+    const paint = () => {
+      const pattern = ctx.createPattern(tile, 'repeat');
+      if (!pattern) return;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.fillStyle = pattern;
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+    };
+
+    renderTile();
+    paint();
+
+    if (!prefersReducedMotion) {
+      const step = () => {
+        if (cancelled) return;
+        renderTile();
+        paint();
+        // ~12fps is plenty for film grain and leaves the CPU alone.
+        timeoutId = setTimeout(() => {
+          if (cancelled) return;
+          rafId = requestAnimationFrame(step);
+        }, 80);
+      };
+      rafId = requestAnimationFrame(step);
+    }
+
+    return () => {
+      // Previously only the resize listener was removed, so the animation loop
+      // kept running (and kept allocating) after navigating away.
+      cancelled = true;
+      cancelAnimationFrame(rafId);
+      if (timeoutId) clearTimeout(timeoutId);
+      window.removeEventListener('resize', resize);
+    };
   }, []);
 
   useEffect(() => {
     if (!savingsCountRef.current) return;
     const el = savingsCountRef.current;
-    const target = 4827341;
+    // EC2, EBS, S3, VPC and RDS.
+    const target = 5;
+    let rafId = 0;
     const obs = new IntersectionObserver(
       ([e]) => {
         if (!e.isIntersecting) return;
         obs.disconnect();
         const start = performance.now();
         const tick = (now: number) => {
-          const p = Math.min((now - start) / 2200, 1);
+          const p = Math.min((now - start) / 1200, 1);
           const ease = 1 - Math.pow(1 - p, 4);
-          el.textContent = '$' + Math.floor(ease * target).toLocaleString();
-          if (p < 1) requestAnimationFrame(tick);
+          el.textContent = String(Math.max(1, Math.round(ease * target)));
+          if (p < 1) rafId = requestAnimationFrame(tick);
         };
         tick(start);
       },
       { threshold: 0.4 }
     );
     obs.observe(el);
-    return () => obs.disconnect();
+    return () => {
+      cancelAnimationFrame(rafId);
+      obs.disconnect();
+    };
   }, []);
 
   useEffect(() => {
     if (!terminalRef.current) return;
     const lines = [
-      { t: 'dim', s: '# Tuff · Cognitive Engine' },
+      { t: 'dim', s: '# Tuff · Analysis Engine' },
       { t: '', s: '' },
-      { t: 'dim', s: '> Analyzing 247 EC2 instances across 4 regions...' },
+      { t: 'dim', s: '> Scanning EC2, EBS, S3, VPC and RDS...' },
       { t: '', s: '' },
-      { t: 'green', s: '[AGENT] Querying CloudWatch — 14d CPU window' },
-      { t: 'green', s: '[RAG]   c5.2xlarge pricing  →  $0.340 / hr' },
-      { t: 'green', s: '[RAG]   t3.large pricing    →  $0.083 / hr' },
+      { t: 'green', s: '[SCAN]  CloudWatch — 14d CPU + NetworkIn window' },
+      { t: 'green', s: '[COST]  c5.2xlarge  →  $0.340 / hr' },
+      { t: 'green', s: '[COST]  t3.large    →  $0.083 / hr' },
       { t: '', s: '' },
       { t: 'sand', s: '[FINDING] i-0a1b2c3d4e' },
       { t: 'muted', s: '  Instance : c5.2xlarge  ·  us-east-1' },
@@ -89,7 +198,6 @@ export default function LandingPage() {
       { t: 'green', s: '[RECOMMENDATION]' },
       { t: 'muted', s: '  Downsize    →  t3.large' },
       { t: 'green', s: '  Savings     →  $174.24 / mo' },
-      { t: 'muted', s: '  Confidence  →  97.3%' },
       { t: '', s: '' },
       { t: 'green', s: '[ACTION GENERATED]' },
       { t: 'muted', s: '  aws ec2 modify-instance-attribute \\' },
@@ -107,20 +215,22 @@ export default function LandingPage() {
       '': '',
     };
     const term = terminalRef.current;
-    let li = 0,
-      ci = 0;
-    const done: any[] = [];
+    let li = 0;
+    let ci = 0;
+    let cancelled = false;
+    let timeoutId: ReturnType<typeof setTimeout>;
+    const done: Array<{ t: string; s: string }> = [];
 
     const type = () => {
-      if (li >= lines.length) return;
+      if (cancelled || li >= lines.length) return;
       const { t, s } = lines[li];
       const cls = colorMap[t] || '';
       if (ci <= s.length) {
         const partial = s.slice(0, ci);
         const rows = done
-          .map(({ t, s }: any) => {
-            const c = colorMap[t] || '';
-            return c ? `<span class="${c}">${s}</span>` : s;
+          .map((row) => {
+            const c = colorMap[row.t] || '';
+            return c ? `<span class="${c}">${row.s}</span>` : row.s;
           })
           .join('\n');
         const cur = cls ? `<span class="${cls}">${partial}</span>` : partial;
@@ -128,61 +238,22 @@ export default function LandingPage() {
           rows + (rows && '\n') + cur + (ci === s.length ? '' : '<span class="t-cursor"></span>');
         ci++;
         term.scrollTop = term.scrollHeight;
-        setTimeout(type, ci === 1 ? 55 : 13);
+        timeoutId = setTimeout(type, ci === 1 ? 55 : 13);
       } else {
         done.push({ t, s });
         li++;
         ci = 0;
-        setTimeout(type, li < lines.length ? 70 : 0);
+        timeoutId = setTimeout(type, li < lines.length ? 70 : 0);
       }
     };
-    setTimeout(type, 1000);
-  }, []);
+    timeoutId = setTimeout(type, 1000);
 
-  useEffect(() => {
-    const data = [
-      {
-        id: 'i-0a1b2c3d4e',
-        type: 'Over-provisioned EC2',
-        inst: 'c5.2xlarge',
-        cpu: '3.2%',
-        cur: '$248/mo',
-        save: '$174/mo',
-        region: 'us-east-1',
-        cpuWarn: false,
-      },
-      {
-        id: 'i-5f6a7b8c9d',
-        type: 'Zombie EBS Volume',
-        inst: 'gp3 500GB',
-        cpu: '0%',
-        cur: '$40/mo',
-        save: '$40/mo',
-        region: 'eu-west-1',
-        cpuWarn: true,
-      },
-      {
-        id: 'i-eab12cd34e',
-        type: 'Idle RDS Instance',
-        inst: 'db.r5.xlarge',
-        cpu: '1.1%',
-        cur: '$380/mo',
-        save: '$285/mo',
-        region: 'us-west-2',
-        cpuWarn: false,
-      },
-      {
-        id: 'i-f0g1h2i3j4',
-        type: 'Over-provisioned EC2',
-        inst: 'm5.4xlarge',
-        cpu: '6.8%',
-        cur: '$560/mo',
-        save: '$420/mo',
-        region: 'ap-se-1',
-        cpuWarn: false,
-      },
-    ];
-    setFindings(data);
+    // The timer chain used to keep firing after unmount, writing into a
+    // detached node.
+    return () => {
+      cancelled = true;
+      clearTimeout(timeoutId);
+    };
   }, []);
 
   useEffect(() => {
@@ -201,6 +272,7 @@ export default function LandingPage() {
     setDismissed((prev) => new Set(prev).add(id));
   };
 
+  const findings = DEMO_FINDINGS;
   const visibleFindings = findings.filter((f) => !dismissed.has(f.id));
 
   return (
@@ -262,20 +334,21 @@ export default function LandingPage() {
 
         <div className="divider"></div>
 
+        {/* Describes what Tuff checks rather than inventing usage statistics. */}
         <div className="metrics">
           <div className="metric">
             <div className="metric-num" ref={savingsCountRef}>
-              $0
+              5
             </div>
-            <div className="metric-label">Savings tracked</div>
+            <div className="metric-label">Services audited</div>
           </div>
           <div className="metric">
-            <div className="metric-num">1,284</div>
-            <div className="metric-label">Zombie resources found</div>
+            <div className="metric-num">14d</div>
+            <div className="metric-label">CloudWatch window</div>
           </div>
           <div className="metric">
-            <div className="metric-num">99.2%</div>
-            <div className="metric-label">Actions approved</div>
+            <div className="metric-num">100%</div>
+            <div className="metric-label">Actions need your approval</div>
           </div>
         </div>
 
@@ -290,8 +363,8 @@ export default function LandingPage() {
               <div className="phase-n">01</div>
               <div className="phase-title">Ingestion</div>
               <div className="phase-desc">
-                Read-only boto3 pulls CloudWatch CPU telemetry and Cost Explorer spend across all
-                regions over a 14-day window.
+                Read-only boto3 calls pull resource configuration and 14 days of CloudWatch CPU and
+                network telemetry, in one region or across all of them.
               </div>
             </div>
             <div className="phase">
@@ -299,8 +372,8 @@ export default function LandingPage() {
               <div className="phase-n">02</div>
               <div className="phase-title">Analysis</div>
               <div className="phase-desc">
-                LangChain agent + ChromaDB RAG grounds every recommendation in real AWS Pricing
-                API data. No hallucinated numbers.
+                Deterministic rules decide what counts as idle, unattached or publicly exposed. A
+                language model then explains each finding in business terms.
               </div>
             </div>
             <div className="phase">
@@ -308,8 +381,8 @@ export default function LandingPage() {
               <div className="phase-n">03</div>
               <div className="phase-title">Action</div>
               <div className="phase-desc">
-                Structured JSON with exact AWS CLI commands. All scripts queued — never
-                auto-executed. Every action waits for you.
+                Every fix — stop, resize, delete, block public access — is queued and never
+                auto-executed. Nothing changes until you approve it.
               </div>
             </div>
             <div className="phase">
@@ -336,8 +409,8 @@ export default function LandingPage() {
                 <em>reason</em> in real-time.
               </h2>
               <p>
-                The cognitive engine queries CloudWatch, grounds every number in real AWS pricing
-                via RAG, and generates the exact CLI command to fix it — held for your approval.
+                Tuff queries CloudWatch, prices the resource against on-demand rates, and prepares
+                the exact change needed to fix it — held for your approval.
               </p>
             </div>
             <div className="terminal-wrap">
@@ -359,7 +432,7 @@ export default function LandingPage() {
               your <em>approval.</em>
             </h2>
             <span className="queue-count">
-              {visibleFindings.length} pending / {findings.length} total
+              Example data · {visibleFindings.length} pending / {findings.length} total
             </span>
           </div>
 

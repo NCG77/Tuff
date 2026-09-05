@@ -43,3 +43,7 @@ next-env.d.ts
 .venv
 
 __pycache__/
+# local / install artifacts
+npm-install.log
+*.db
+backend/*.db

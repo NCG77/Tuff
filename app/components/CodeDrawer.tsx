@@ -1,7 +1,9 @@
 "use client";
 
+import type { Finding } from "@/app/lib/types";
+
 interface CodeDrawerProps {
-  selectedFinding: any;
+  selectedFinding: Finding | null;
   onClose: () => void;
 }
 
@@ -11,12 +13,17 @@ export default function CodeDrawer({
 }: CodeDrawerProps) {
   if (!selectedFinding) return null;
 
-  const generateBashCommand = (item: any) => {
-    if (!item) return "";
-    if (item.type.includes("EC2"))
-      return `aws ec2 stop-instances \\\n  --instance-ids ${item.id} \\\n  --region ${item.region}`;
+  const generateBashCommand = (item: Finding) => {
     if (item.type.includes("Volume"))
       return `aws ec2 delete-volume \\\n  --volume-id ${item.id} \\\n  --region ${item.region}`;
+    if (item.type.includes("RDS"))
+      return `aws rds stop-db-instance \\\n  --db-instance-identifier ${item.id} \\\n  --region ${item.region}`;
+    if (item.type.includes("VPC"))
+      return `aws ec2 delete-vpc \\\n  --vpc-id ${item.id} \\\n  --region ${item.region}`;
+    // Checked after the more specific types, because "Scaling Candidate (EC2)"
+    // also contains "EC2".
+    if (item.type.includes("EC2"))
+      return `aws ec2 stop-instances \\\n  --instance-ids ${item.id} \\\n  --region ${item.region}`;
     return `aws s3api put-public-access-block \\\n  --bucket ${item.id} \\\n  --public-access-block-configuration \\\n  "BlockPublicAcls=true,IgnorePublicAcls=true,BlockPublicPolicy=true,RestrictPublicBuckets=true"`;
   };
 

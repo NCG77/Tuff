@@ -1,9 +1,9 @@
 "use client";
 
-import React, { useState } from 'react';
-import { X, Check, ShieldCheck, Zap } from 'lucide-react';
+import React, { useCallback, useEffect, useState } from 'react';
+import { X, Check, ShieldCheck } from 'lucide-react';
 import { useAuth } from '../context/AuthContext';
-import { api } from '../lib/config';
+import { api, devError, extractErrorMessage, networkErrorMessage } from '../lib/config';
 
 interface PricingModalProps {
   isOpen: boolean;
@@ -13,109 +13,31 @@ interface PricingModalProps {
 
 declare global {
   interface Window {
-    Razorpay: any;
+    Razorpay: new (options: Record<string, unknown>) => { open: () => void };
   }
 }
 
-export default function PricingModal({ isOpen, onClose, onSuccess }: PricingModalProps) {
-  const { user } = useAuth();
-  const [loading, setLoading] = useState(false);
-  const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
+const RAZORPAY_SDK = 'https://checkout.razorpay.com/v1/checkout.js';
 
-  if (!isOpen) return null;
+const PLAN_PRICE_LABEL: Record<'monthly' | 'yearly', string> = {
+  monthly: '299',
+  yearly: '3,399',
+};
 
-  const handleUpgrade = async () => {
-    if (!user) return;
-    setLoading(true);
-    
-    try {
-      const res = await loadScript('https://checkout.razorpay.com/v1/checkout.js');
-      if (!res) {
-        alert('Razorpay SDK failed to load. Are you online?');
-        setLoading(false);
-        return;
-      }
+// Must stay in step with PLAN_CREDIT_GRANT in backend/app.py.
+const PLAN_CREDIT_LABEL: Record<'monthly' | 'yearly', string> = {
+  monthly: '10,000',
+  yearly: '120,000',
+};
 
-      const token = await user.getIdToken();
-      const headers = {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${token}`
-      };
-      
-      const orderRes = await fetch(`${api.baseURL}/api/user/credits/buy`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({ plan: billingCycle })
-      });
-      const orderData = await orderRes.json();
-      
-      if (!orderRes.ok) {
-        throw new Error(orderData.detail || 'Failed to create order');
-      }
-
-      const options = {
-        key: process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID,
-        amount: orderData.amount,
-        currency: orderData.currency,
-        name: 'TUFF Cloud Security',
-        description: `TUFF Pro ${billingCycle} subscription`,
-        order_id: orderData.order_id,
-        handler: async function (response: any) {
-          try {
-            const verifyRes = await fetch(`${api.baseURL}/api/user/verify-payment`, {
-              method: 'POST',
-              headers,
-              body: JSON.stringify({
-                razorpay_order_id: response.razorpay_order_id,
-                razorpay_payment_id: response.razorpay_payment_id,
-                razorpay_signature: response.razorpay_signature,
-                amount: orderData.amount
-              })
-            });
-            const verifyData = await verifyRes.json();
-            if (verifyRes.ok && verifyData.status === 'success') {
-              onSuccess(verifyData.credits, verifyData.tier);
-              onClose();
-            } else {
-              alert('Payment verification failed. Please contact support.');
-            }
-          } catch (e) {
-            console.error(e);
-            alert('Error verifying payment.');
-          }
-        },
-        prefill: {
-          email: user.email || ''
-        },
-        theme: {
-          color: '#8b7355'
-        }
-      };
-
-      const paymentObject = new window.Razorpay(options);
-      paymentObject.open();
-      
-    } catch (e) {
-      console.error(e);
-      alert('Payment initialization failed.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadScript = (src: string) => {
-    return new Promise((resolve) => {
-      if (document.querySelector(`script[src="${src}"]`)) {
-        resolve(true);
-        return;
-      }
-      const script = document.createElement('script');
-      script.src = src;
-      script.onload = () => resolve(true);
-      script.onerror = () => resolve(false);
-      document.body.appendChild(script);
-    });
-  };
+function featuresFor(cycle: 'monthly' | 'yearly'): string[] {
+  return [
+    `${PLAN_CREDIT_LABEL[cycle]} premium AI credits`,
+    'AI analysis on every finding, with no free-tier cap',
+    'Higher scan rate limits',
+    'Priority support',
+  ];
+}
 
 const styles = {
   overlay: {
@@ -130,15 +52,15 @@ const styles = {
     backdropFilter: 'blur(12px)',
     WebkitBackdropFilter: 'blur(12px)',
     fontFamily: 'Jost, sans-serif',
-    transition: 'all 300ms ease-in-out',
-    animation: 'fadeIn 300ms ease-out forwards',
+    animation: 'tuffFadeIn 300ms ease-out forwards',
   },
   modalContainer: {
     position: 'relative' as const,
     width: '100%',
     maxWidth: '800px',
+    maxHeight: '90vh',
+    overflowY: 'auto' as const,
     borderRadius: '24px',
-    overflow: 'hidden',
     boxShadow: '0 25px 50px -12px rgba(0, 0, 0, 0.25)',
     background: 'linear-gradient(135deg, #fdfbf9, #f5f1ed)',
     border: '1px solid rgba(139, 115, 85, 0.2)',
@@ -160,13 +82,6 @@ const styles = {
     display: 'flex',
     flexDirection: 'column' as const,
     alignItems: 'center',
-  },
-  iconWrapper: {
-    padding: '12px',
-    borderRadius: '16px',
-    marginBottom: '24px',
-    background: 'rgba(139, 115, 85, 0.08)',
-    border: '1px solid rgba(139, 115, 85, 0.1)',
   },
   title: {
     fontSize: '30px',
@@ -246,7 +161,6 @@ const styles = {
     fontWeight: 600,
     borderRadius: '16px',
     border: 'none',
-    cursor: 'pointer',
     transition: 'all 300ms',
     background: 'linear-gradient(135deg, rgba(139, 115, 85, 0.95), rgba(110, 90, 65, 0.95))',
     letterSpacing: '0.05em',
@@ -255,6 +169,17 @@ const styles = {
     alignItems: 'center',
     justifyContent: 'center',
     gap: '8px',
+  },
+  errorBox: {
+    width: '100%',
+    marginBottom: '16px',
+    padding: '12px 16px',
+    borderRadius: '12px',
+    background: 'rgba(212, 58, 42, 0.08)',
+    border: '1px solid rgba(212, 58, 42, 0.3)',
+    color: '#a12c23',
+    fontSize: '13px',
+    lineHeight: 1.5,
   },
   footerText: {
     display: 'flex',
@@ -266,106 +191,256 @@ const styles = {
     fontWeight: 500,
     color: '#8b7355',
     opacity: 0.8,
-  }
+  },
 };
 
+function loadScript(src: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    if (document.querySelector(`script[src="${src}"]`)) {
+      resolve(true);
+      return;
+    }
+    const script = document.createElement('script');
+    script.src = src;
+    script.onload = () => resolve(true);
+    script.onerror = () => resolve(false);
+    document.body.appendChild(script);
+  });
+}
+
+export default function PricingModal({ isOpen, onClose, onSuccess }: PricingModalProps) {
+  const { user } = useAuth();
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [billingCycle, setBillingCycle] = useState<'monthly' | 'yearly'>('monthly');
+
+  const handleClose = useCallback(() => {
+    if (loading) return;
+    setError(null);
+    onClose();
+  }, [loading, onClose]);
+
+  // Escape closes the modal, and background scrolling is locked while it is
+  // open -- both were missing, so the dialog felt like a dead end.
+  useEffect(() => {
+    if (!isOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') handleClose();
+    };
+    window.addEventListener('keydown', onKeyDown);
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isOpen, handleClose]);
+
+  if (!isOpen) return null;
+
+  const razorpayKey = process.env.NEXT_PUBLIC_RAZORPAY_KEY_ID;
+
+  const handleUpgrade = async () => {
+    if (!user) {
+      setError('Please sign in again before upgrading.');
+      return;
+    }
+    if (!razorpayKey) {
+      setError('Checkout is not configured for this deployment. Please contact support.');
+      return;
+    }
+
+    setLoading(true);
+    setError(null);
+
+    try {
+      const sdkLoaded = await loadScript(RAZORPAY_SDK);
+      if (!sdkLoaded) {
+        setError('Could not load the payment provider. Check your connection or any ad blockers.');
+        return;
+      }
+
+      const token = await user.getIdToken();
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+      };
+
+      const orderRes = await fetch(api.endpoints.buyCredits, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ plan: billingCycle }),
+      });
+
+      if (!orderRes.ok) {
+        setError(await extractErrorMessage(orderRes, 'Could not start checkout. Please try again.'));
+        return;
+      }
+      const orderData = await orderRes.json();
+
+      const paymentObject = new window.Razorpay({
+        key: razorpayKey,
+        amount: orderData.amount,
+        currency: orderData.currency,
+        name: 'Tuff',
+        description: `Tuff Pro (${billingCycle})`,
+        order_id: orderData.order_id,
+        prefill: { email: user.email || '' },
+        theme: { color: '#8b7355' },
+        modal: {
+          // Without this the button stayed in "Processing…" forever when the
+          // user closed the Razorpay overlay instead of paying.
+          ondismiss: () => setLoading(false),
+        },
+        handler: async (response: Record<string, string>) => {
+          try {
+            const verifyRes = await fetch(api.endpoints.verifyPayment, {
+              method: 'POST',
+              headers,
+              body: JSON.stringify({
+                razorpay_order_id: response.razorpay_order_id,
+                razorpay_payment_id: response.razorpay_payment_id,
+                razorpay_signature: response.razorpay_signature,
+              }),
+            });
+
+            if (!verifyRes.ok) {
+              setError(
+                await extractErrorMessage(
+                  verifyRes,
+                  'We could not confirm your payment. If you were charged, contact support and we will sort it out.',
+                ),
+              );
+              return;
+            }
+
+            const verifyData = await verifyRes.json();
+            onSuccess(verifyData.credits, verifyData.tier);
+            onClose();
+          } catch (e) {
+            devError('Payment verification failed', e);
+            setError('Payment went through but confirmation failed. Please contact support.');
+          } finally {
+            setLoading(false);
+          }
+        },
+      });
+      paymentObject.open();
+    } catch (e) {
+      devError('Payment initialisation failed', e);
+      setError(networkErrorMessage());
+      setLoading(false);
+    }
+  };
+
   return (
-    <div style={styles.overlay}>
-      <div style={styles.modalContainer}>
-        <button 
-          onClick={onClose} 
+    <div style={styles.overlay} onClick={handleClose} role="presentation">
+      <div
+        style={styles.modalContainer}
+        onClick={(e) => e.stopPropagation()}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="pricing-title"
+      >
+        <button
+          onClick={handleClose}
           style={styles.closeBtn}
-          onMouseOver={(e) => e.currentTarget.style.transform = 'scale(1.1)'}
-          onMouseOut={(e) => e.currentTarget.style.transform = 'scale(1)'}
+          aria-label="Close upgrade dialog"
+          onMouseOver={(e) => (e.currentTarget.style.transform = 'scale(1.1)')}
+          onMouseOut={(e) => (e.currentTarget.style.transform = 'scale(1)')}
         >
           <X size={20} />
         </button>
 
         <div style={styles.content}>
-          <h2 style={styles.title}>TUFF Pro</h2>
+          <h2 id="pricing-title" style={styles.title}>Tuff Pro</h2>
           <p style={styles.subtitle}>
-            Automate security compliance with unlimited AI resolution.
+            Unlimited AI analysis on every finding Tuff surfaces.
           </p>
 
-          <div style={styles.toggleContainer}>
-            <button
-              onClick={() => setBillingCycle('monthly')}
-              style={{
-                ...styles.toggleBtn,
-                backgroundColor: billingCycle === 'monthly' ? '#fff' : 'transparent',
-                color: billingCycle === 'monthly' ? '#6b5344' : '#8b7355',
-                boxShadow: billingCycle === 'monthly' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none'
-              }}
-            >
-              Monthly
-            </button>
-            <button
-              onClick={() => setBillingCycle('yearly')}
-              style={{
-                ...styles.toggleBtn,
-                backgroundColor: billingCycle === 'yearly' ? '#fff' : 'transparent',
-                color: billingCycle === 'yearly' ? '#6b5344' : '#8b7355',
-                boxShadow: billingCycle === 'yearly' ? '0 1px 2px rgba(0,0,0,0.05)' : 'none'
-              }}
-            >
-              Yearly 
-              <span style={{ marginLeft: '4px', fontSize: '10px', textTransform: 'uppercase', fontWeight: 'bold', color: '#059669', backgroundColor: '#d1fae5', padding: '2px 6px', borderRadius: '4px' }}>
-                Save 5%
-              </span>
-            </button>
+          <div style={styles.toggleContainer} role="group" aria-label="Billing cycle">
+            {(['monthly', 'yearly'] as const).map((cycle) => (
+              <button
+                key={cycle}
+                onClick={() => setBillingCycle(cycle)}
+                aria-pressed={billingCycle === cycle}
+                style={{
+                  ...styles.toggleBtn,
+                  backgroundColor: billingCycle === cycle ? '#fff' : 'transparent',
+                  color: billingCycle === cycle ? '#6b5344' : '#8b7355',
+                  boxShadow: billingCycle === cycle ? '0 1px 2px rgba(0,0,0,0.05)' : 'none',
+                  textTransform: 'capitalize',
+                }}
+              >
+                {cycle}
+                {cycle === 'yearly' && (
+                  <span
+                    style={{
+                      marginLeft: '4px',
+                      fontSize: '10px',
+                      textTransform: 'uppercase',
+                      fontWeight: 'bold',
+                      color: '#059669',
+                      backgroundColor: '#d1fae5',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                    }}
+                  >
+                    Save 5%
+                  </span>
+                )}
+              </button>
+            ))}
           </div>
 
           <div style={styles.priceContainer}>
-            <span style={styles.priceAmount}>
-              ₹{billingCycle === 'monthly' ? '299' : '3,399'}
-            </span>
-            <span style={styles.pricePeriod}>
-              /{billingCycle === 'monthly' ? 'mo' : 'yr'}
-            </span>
+            <span style={styles.priceAmount}>₹{PLAN_PRICE_LABEL[billingCycle]}</span>
+            <span style={styles.pricePeriod}>/{billingCycle === 'monthly' ? 'mo' : 'yr'}</span>
           </div>
 
           <div style={styles.featuresList}>
-            {[
-              "10,000 Premium AI Credits",
-              "Access to openrouter/auto AI logic",
-              "250k tokens per session limit",
-              "Priority enterprise support"
-            ].map((feature, i) => (
-              <div key={i} style={styles.featureItem}>
+            {featuresFor(billingCycle).map((feature) => (
+              <div key={feature} style={styles.featureItem}>
                 <Check size={20} color="#8b7355" strokeWidth={2.5} />
                 <span style={styles.featureText}>{feature}</span>
               </div>
             ))}
           </div>
 
+          {error && (
+            <div style={styles.errorBox} role="alert">
+              {error}
+            </div>
+          )}
+
           <button
             onClick={handleUpgrade}
             disabled={loading}
-            style={styles.upgradeBtn}
-            onMouseOver={(e) => !loading && (e.currentTarget.style.transform = 'translateY(-2px)', e.currentTarget.style.boxShadow = '0 10px 15px -3px rgba(0, 0, 0, 0.1)')}
-            onMouseOut={(e) => !loading && (e.currentTarget.style.transform = 'translateY(0)', e.currentTarget.style.boxShadow = 'none')}
+            style={{
+              ...styles.upgradeBtn,
+              cursor: loading ? 'wait' : 'pointer',
+              opacity: loading ? 0.75 : 1,
+            }}
           >
-            {loading ? (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <span>Processing...</span>
-              </div>
-            ) : (
-              "Upgrade Now"
-            )}
+            {loading ? 'Processing…' : 'Upgrade Now'}
           </button>
 
           <div style={styles.footerText}>
             <ShieldCheck size={14} />
-            <span>Secured locally by Razorpay</span>
+            <span>Payments handled by Razorpay. Tuff never sees your card details.</span>
           </div>
         </div>
       </div>
-      <style dangerouslySetInnerHTML={{__html: `
-        @keyframes fadeIn {
-          from { opacity: 0; transform: scale(0.95); }
-          to { opacity: 1; transform: scale(1); }
+      <style
+        dangerouslySetInnerHTML={{
+          __html: `
+        @keyframes tuffFadeIn {
+          from { opacity: 0; }
+          to { opacity: 1; }
         }
-      `}} />
+      `,
+        }}
+      />
     </div>
   );
 }

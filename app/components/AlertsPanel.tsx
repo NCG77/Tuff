@@ -1,26 +1,13 @@
-import { useState, useRef, useMemo } from "react";
-import { useVirtualizer } from "@tanstack/react-virtual";
+import { useState, useMemo } from "react";
 import styles from "@/app/src/main_page/page.module.css";
+import { formatTimestamp } from "@/app/lib/format";
+import type { AlertConfig, TriggeredAlert } from "@/app/lib/types";
 
-interface AlertConfig {
-  id: string;
-  resourceType: string;
-  metric: string;
-  threshold: number;
-  thresholdType: string;
-}
-
-interface TriggeredAlert {
-  id: string;
-  configId: string;
-  resourceId: string;
-  resourceType: string;
-  metric: string;
-  value: number;
-  threshold: number;
-  condition: string;
-  timestamp: string;
-}
+const METRIC_LABELS: Record<string, string> = {
+  cpu: "CPU utilisation (%)",
+  save: "Monthly savings ($)",
+  cur: "Current cost ($)",
+};
 
 interface AlertsPanelProps {
   alertConfigs: AlertConfig[];
@@ -36,24 +23,46 @@ export default function AlertsPanel({
   onRemoveAlert,
 }: AlertsPanelProps) {
   const [showAlertForm, setShowAlertForm] = useState(false);
-  const parentRef = useRef<HTMLDivElement>(null);
-  const reversedAlerts = useMemo(() => [...triggeredAlerts].reverse(), [triggeredAlerts]);
 
-  const rowVirtualizer = useVirtualizer({
-    count: reversedAlerts.length,
-    getScrollElement: () => parentRef.current,
-    estimateSize: () => 40,
-    overscan: 10,
-  });
+  // Newest first. The list arrives sorted that way from the API, and the
+  // previous `.reverse()` pushed the most recent alert out of sight at the
+  // bottom of the scroll container.
+  const orderedAlerts = useMemo(
+    () =>
+      [...triggeredAlerts].sort(
+        (a, b) => new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime(),
+      ),
+    [triggeredAlerts],
+  );
+
   const [newAlert, setNewAlert] = useState({
     resourceType: "EC2",
     metric: "cpu",
     threshold: 10,
     thresholdType: "below",
   });
+  const [formError, setFormError] = useState<string | null>(null);
 
   const handleCreateAlert = () => {
-    if (!newAlert.threshold) return;
+    // `!newAlert.threshold` rejected a legitimate threshold of 0, which is a
+    // reasonable value for "CPU below 0%"-style checks on savings and cost.
+    if (!Number.isFinite(newAlert.threshold)) {
+      setFormError("Enter a numeric threshold value.");
+      return;
+    }
+    const duplicate = alertConfigs.some(
+      (config) =>
+        config.resourceType === newAlert.resourceType &&
+        config.metric === newAlert.metric &&
+        config.thresholdType === newAlert.thresholdType &&
+        config.threshold === newAlert.threshold,
+    );
+    if (duplicate) {
+      setFormError("You already have an identical alert.");
+      return;
+    }
+
+    setFormError(null);
     onAddAlert(newAlert as Omit<AlertConfig, "id">);
     setNewAlert({
       resourceType: "EC2",
@@ -61,6 +70,7 @@ export default function AlertsPanel({
       threshold: 10,
       thresholdType: "below",
     });
+    setShowAlertForm(false);
   };
 
   return (
@@ -146,6 +156,12 @@ export default function AlertsPanel({
               />
             </div>
 
+            {formError && (
+              <p role="alert" style={{ color: "#d43a2a", fontSize: "12px", margin: 0 }}>
+                {formError}
+              </p>
+            )}
+
             <button
               className={styles.createAlertBtn}
               onClick={handleCreateAlert}
@@ -174,7 +190,9 @@ export default function AlertsPanel({
                   <span className={styles.configCell}>
                     {config.resourceType}
                   </span>
-                  <span className={styles.configCell}>{config.metric}</span>
+                  <span className={styles.configCell}>
+                    {METRIC_LABELS[config.metric] ?? config.metric}
+                  </span>
                   <span className={styles.configCell}>
                     {config.thresholdType}
                   </span>
@@ -182,6 +200,7 @@ export default function AlertsPanel({
                   <button
                     className={styles.removeAlertBtn}
                     onClick={() => onRemoveAlert(config.id)}
+                    aria-label={`Remove ${config.resourceType} ${config.metric} alert`}
                   >
                     Remove
                   </button>
@@ -195,6 +214,9 @@ export default function AlertsPanel({
       <div className={`${styles.largeCard} ${styles.alertHistoryCard}`}>
         <div className={styles.cardHeader}>
           <h3>Triggered Alerts ({triggeredAlerts.length})</h3>
+          {triggeredAlerts.length > 0 && (
+            <span style={{ fontSize: "12px", color: "#8b7355" }}>newest first</span>
+          )}
         </div>
 
         {triggeredAlerts.length === 0 ? (
@@ -212,48 +234,35 @@ export default function AlertsPanel({
               <span className={styles.historyCol}>Threshold</span>
               <span className={styles.historyCol}>Condition</span>
             </div>
-            <div className={styles.alertHistoryContainer} ref={parentRef} style={{ overflow: 'auto', height: '400px' }}>
-              <div
-                style={{
-                  height: `${rowVirtualizer.getTotalSize()}px`,
-                  width: '100%',
-                  position: 'relative',
-                }}
-              >
-                {rowVirtualizer.getVirtualItems().map((virtualRow) => {
-                  const alert = reversedAlerts[virtualRow.index];
-                  return (
-                    <div 
-                      key={alert.id} 
-                      className={styles.alertHistoryRow}
-                      style={{
-                        position: 'absolute',
-                        top: 0,
-                        left: 0,
-                        width: '100%',
-                        height: `${virtualRow.size}px`,
-                        transform: `translateY(${virtualRow.start}px)`,
-                      }}
-                    >
-                      <span className={styles.historyCell}>{alert.timestamp}</span>
-                      <span className={styles.historyCell}>
-                        {alert.resourceId}
-                      </span>
-                      <span className={styles.historyCell}>
-                        {alert.resourceType}
-                      </span>
-                      <span className={styles.historyCell}>{alert.metric}</span>
-                      <span className={styles.historyCell}>{alert.value}</span>
-                      <span className={styles.historyCell}>{alert.threshold}</span>
-                      <span
-                        className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}
-                      >
-                        {alert.condition}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
+            {/* A plain scrolling list: the API caps this history at 500 rows,
+                which does not need virtualisation, and the absolute
+                positioning it required was cramping the row contents. */}
+            <div
+              className={styles.alertHistoryContainer}
+              style={{ overflowY: "auto", maxHeight: "400px" }}
+            >
+              {orderedAlerts.map((alert) => (
+                <div
+                  key={`${alert.configId}-${alert.resourceId}-${alert.timestamp}`}
+                  className={styles.alertHistoryRow}
+                >
+                  <span className={styles.historyCell}>{formatTimestamp(alert.timestamp)}</span>
+                  <span className={styles.historyCell}>{alert.resourceId}</span>
+                  <span className={styles.historyCell}>{alert.resourceType}</span>
+                  <span className={styles.historyCell}>
+                    {METRIC_LABELS[alert.metric] ?? alert.metric}
+                  </span>
+                  <span className={styles.historyCell}>
+                    {Number.isFinite(alert.value) ? Number(alert.value).toFixed(2) : "—"}
+                  </span>
+                  <span className={styles.historyCell}>{alert.threshold}</span>
+                  <span
+                    className={`${styles.historyCell} ${styles[`alertCondition${alert.condition}`]}`}
+                  >
+                    {alert.condition}
+                  </span>
+                </div>
+              ))}
             </div>
           </>
         )}
