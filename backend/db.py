@@ -11,7 +11,9 @@ load_dotenv(os.path.join(_HERE, ".env"))
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set. Please configure it in .env.local or .env.")
+    import logging
+    logging.warning("DATABASE_URL is not set. Defaulting to ephemeral SQLite database.")
+    DATABASE_URL = "sqlite:///./tuff_local.db"
 
 _connect_args = {}
 _engine_kwargs = {

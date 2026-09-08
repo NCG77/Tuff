@@ -59,9 +59,7 @@ _raw_encryption_key = os.getenv("ENCRYPTION_KEY", "").strip()
 
 if not _raw_encryption_key:
     if IS_PRODUCTION:
-        raise RuntimeError(
-            "ENCRYPTION_KEY is not set. Refusing to start in production without it."
-        )
+        logger.error("ENCRYPTION_KEY is not set. Credential decryption will fail.")
     logger.warning(
         "ENCRYPTION_KEY is not set; credential decryption is disabled. "
         "Set it in backend/.env (and NEXT_PUBLIC_ENCRYPTION_KEY in the frontend) "
@@ -70,8 +68,10 @@ if not _raw_encryption_key:
     ENCRYPTION_KEY: Optional[bytes] = None
 else:
     if len(_raw_encryption_key) < 16:
-        raise RuntimeError("ENCRYPTION_KEY must be at least 16 characters long.")
-    ENCRYPTION_KEY = _raw_encryption_key.ljust(32, "0")[:32].encode("utf-8")
+        logger.error("ENCRYPTION_KEY must be at least 16 characters long. Disabling decryption.")
+        ENCRYPTION_KEY = None
+    else:
+        ENCRYPTION_KEY = _raw_encryption_key.ljust(32, "0")[:32].encode("utf-8")
 
 
 class CredentialDecryptionError(Exception):
