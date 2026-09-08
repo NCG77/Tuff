@@ -416,7 +416,7 @@ export default function MainPage() {
       });
 
       if (!response.ok) {
-        if (response.status === 429 || response.status === 402) {
+        if (response.status === 402) {
           setIsPricingModalOpen(true);
           return;
         }

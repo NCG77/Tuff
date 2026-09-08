@@ -124,9 +124,9 @@ export default function AwsConnectForm({
       });
 
       if (!response.ok) {
-        // 402/429 mean the account is out of AI credits rather than that the
+        // 402 means the account is out of AI credits rather than that the
         // credentials are wrong, so route the user to the upgrade flow.
-        if ((response.status === 429 || response.status === 402) && onTokenLimit) {
+        if (response.status === 402 && onTokenLimit) {
           onTokenLimit();
           return;
         }
