@@ -31,11 +31,11 @@ IS_PRODUCTION = ENVIRONMENT == "production"
 
 FIREBASE_PROJECT_ID = os.getenv("FIREBASE_PROJECT_ID", "").strip()
 if not FIREBASE_PROJECT_ID:
-    raise RuntimeError(
+    logger.warning(
         "FIREBASE_PROJECT_ID is not set. Tuff cannot verify user identity without it."
     )
 
-FIREBASE_ISSUER = f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}"
+FIREBASE_ISSUER = f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}" if FIREBASE_PROJECT_ID else ""
 
 # Firebase mints tokens with a 1 hour lifetime; a small skew allowance keeps
 # clients with slightly wrong clocks working without meaningfully widening the
@@ -141,10 +141,14 @@ try:  # pragma: no cover - depends on deployment credentials
     import firebase_admin
     from firebase_admin import auth as firebase_auth
 
-    if not firebase_admin._apps:
+    if not firebase_admin._apps and FIREBASE_PROJECT_ID:
         firebase_admin.initialize_app(options={"projectId": FIREBASE_PROJECT_ID})
-    _firebase_admin_ready = True
-    logger.info("Firebase Admin SDK initialised for project %s", FIREBASE_PROJECT_ID)
+    if FIREBASE_PROJECT_ID:
+        _firebase_admin_ready = True
+        logger.info("Firebase Admin SDK initialised for project %s", FIREBASE_PROJECT_ID)
+    else:
+        _firebase_admin_ready = False
+        logger.warning("Firebase Admin SDK not initialised because FIREBASE_PROJECT_ID is missing.")
 except Exception as exc:  # pragma: no cover
     logger.warning(
         "Firebase Admin SDK unavailable (%s); falling back to direct ID token "
@@ -189,6 +193,13 @@ async def get_current_user(
     decode-without-verify path: an unsigned payload is trivially forgeable and
     would let any caller impersonate any user.
     """
+    if not FIREBASE_PROJECT_ID:
+        logger.error("Rejecting authentication because FIREBASE_PROJECT_ID is not set.")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Server configuration error: FIREBASE_PROJECT_ID is not set.",
+        )
+
     token = credentials.credentials
     claims: Optional[dict] = None
     failure: Optional[Exception] = None
