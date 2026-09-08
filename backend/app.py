@@ -785,8 +785,8 @@ async def analyze_infrastructure(
             # than returning an empty, apparently-clean report.
             _log_scan_failure(db, scan_id, user_id, request.region, quota_error)
             if "ERROR_INSUFFICIENT_FUNDS" in quota_error:
-                raise HTTPException(status_code=402, detail="AI_BILLING_LIMIT_REACHED")
-            raise HTTPException(status_code=429, detail="AI_TOKEN_LIMIT_REACHED")
+                raise HTTPException(status_code=503, detail="The AI provider is temporarily unavailable. Please try again later.")
+            raise HTTPException(status_code=503, detail="The AI provider is currently overloaded. Please try again later.")
 
         ai_evaluated_queue = []
         minimal_findings = []
