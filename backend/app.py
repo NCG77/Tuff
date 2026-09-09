@@ -2,6 +2,7 @@ import concurrent.futures
 import logging
 import os
 import re
+import time
 import uuid
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
@@ -308,7 +309,9 @@ def _ensure_user(db: Session, user_id: str) -> UserSubscription:
     """
     record = db.query(UserSubscription).filter(UserSubscription.user_id == user_id).first()
     if record is None:
-        record = UserSubscription(user_id=user_id, subscription_tier="free")
+        # Explicit grant so new accounts never land with NULL/0 if the column
+        # default is missing on an older schema.
+        record = UserSubscription(user_id=user_id, subscription_tier="free", credits=1000)
         db.add(record)
         db.commit()
         db.refresh(record)
@@ -398,7 +401,7 @@ def _parse_metric(raw) -> Optional[float]:
 
 
 @app.post("/api/user/sync")
-async def sync_user_tier(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
+def sync_user_tier(current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)):
     """
     Called by the frontend immediately after a successful Firebase login.
     Checks if the user exists. If not, provisions a free-tier profile.
@@ -418,8 +421,122 @@ async def sync_user_tier(current_user: dict = Depends(get_current_user), db: Ses
         raise HTTPException(status_code=500, detail="Could not load your profile. Please try again.")
 
 
+@app.get("/api/me/bootstrap")
+def bootstrap_me(
+    include: str = Query(
+        "profile",
+        description="Comma-separated slices: profile, alerts, logs (or all)",
+    ),
+    logs_limit: int = Query(100, ge=1, le=500),
+    alerts_limit: int = Query(100, ge=1, le=500),
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Single auth + single DB session for dashboard slices.
+
+    Replaces the old parallel sync/config/logs/triggered fan-out that paid
+    Firebase verify and a Supabase checkout four times on every reload.
+    """
+    t0 = time.perf_counter()
+    requested = {part.strip().lower() for part in include.split(",") if part.strip()}
+    if "all" in requested:
+        requested = {"profile", "alerts", "logs"}
+    if not requested:
+        requested = {"profile"}
+
+    unknown = requested - {"profile", "alerts", "logs"}
+    if unknown:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown include value(s): {', '.join(sorted(unknown))}",
+        )
+
+    uid = current_user["uid"]
+    payload: dict = {"status": "ok", "include": sorted(requested)}
+
+    try:
+        if "profile" in requested:
+            user_record = _ensure_user(db, uid)
+            payload["profile"] = {
+                "tier": user_record.subscription_tier,
+                "credits": user_record.credits,
+                "user_id": user_record.user_id,
+                "credits_per_finding": CREDITS_PER_FINDING,
+            }
+
+        if "alerts" in requested:
+            configs = (
+                db.query(AlertConfig)
+                .filter(AlertConfig.active == True, AlertConfig.user_id == uid)  # noqa: E712
+                .order_by(AlertConfig.created_at.desc())
+                .all()
+            )
+            alerts = (
+                db.query(TriggeredAlert)
+                .filter(TriggeredAlert.user_id == uid)
+                .order_by(TriggeredAlert.timestamp.desc())
+                .limit(alerts_limit)
+                .all()
+            )
+            payload["alerts"] = {
+                "configs": [
+                    {
+                        "id": c.id,
+                        "resourceType": c.resource_type,
+                        "metric": c.metric,
+                        "threshold": c.threshold,
+                        "thresholdType": c.threshold_type,
+                        "created_at": format_datetime(c.created_at),
+                    }
+                    for c in configs
+                ],
+                "triggered": [
+                    {
+                        "id": alert.id,
+                        "configId": alert.config_id,
+                        "resourceId": alert.resource_id,
+                        "resourceType": alert.resource_type,
+                        "metric": alert.metric,
+                        "value": alert.value,
+                        "threshold": alert.threshold,
+                        "condition": alert.condition,
+                        "timestamp": format_datetime(alert.timestamp),
+                    }
+                    for alert in alerts
+                ],
+            }
+
+        if "logs" in requested:
+            logs = (
+                db.query(ActionLog)
+                .filter(ActionLog.user_id == uid)
+                .order_by(ActionLog.timestamp.desc())
+                .limit(logs_limit)
+                .all()
+            )
+            payload["logs"] = [
+                {
+                    "id": log.id,
+                    "resource_id": log.resource_id,
+                    "action": log.action,
+                    "type": log.resource_type,
+                    "timestamp": format_datetime(log.timestamp),
+                }
+                for log in logs
+            ]
+
+        payload["timing_ms"] = round((time.perf_counter() - t0) * 1000, 1)
+        return JSONResponse(content=payload)
+    except HTTPException:
+        raise
+    except Exception:
+        logger.exception("Failed to bootstrap user profile")
+        _safe_rollback(db)
+        raise HTTPException(status_code=500, detail="Could not load your dashboard data.")
+
+
 @app.post("/api/user/credits/buy")
-async def create_razorpay_order(
+def create_razorpay_order(
     request: BuyCreditsRequest,
     current_user: dict = Depends(rate_limit(10, 300, "buy")),
     db: Session = Depends(get_db),
@@ -466,7 +583,7 @@ async def create_razorpay_order(
 
 
 @app.post("/api/user/verify-payment")
-async def verify_payment(
+def verify_payment(
     req: PaymentVerifyRequest,
     current_user: dict = Depends(rate_limit(20, 300, "verify")),
     db: Session = Depends(get_db),
@@ -666,7 +783,7 @@ def _scan_region(access_key: str, secret_key: str, region: str) -> list:
 
 
 @app.post("/api/analyze")
-async def analyze_infrastructure(
+def analyze_infrastructure(
     request: ScanRequest,
     current_user: dict = Depends(rate_limit(6, 300, "analyze")),
     db: Session = Depends(get_db),
@@ -906,7 +1023,7 @@ def _build_minimal_finding(finding: dict, analysis: dict) -> dict:
 
 
 @app.post("/api/execute")
-async def execute_remediation(
+def execute_remediation(
     request: ExecuteRequest,
     current_user: dict = Depends(rate_limit(30, 300, "execute")),
     db: Session = Depends(get_db),
@@ -1054,7 +1171,7 @@ async def execute_remediation(
 
 
 @app.get("/api/logs/infrastructure")
-async def get_infrastructure_logs(
+def get_infrastructure_logs(
     limit: int = Query(50, ge=1, le=200),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1087,7 +1204,7 @@ async def get_infrastructure_logs(
 
 
 @app.get("/api/logs/infrastructure/{scan_id}")
-async def get_scan_details(
+def get_scan_details(
     scan_id: str,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1123,7 +1240,7 @@ async def get_scan_details(
 
 
 @app.get("/api/logs/execution")
-async def get_execution_logs(
+def get_execution_logs(
     limit: int = Query(50, ge=1, le=200),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1161,7 +1278,7 @@ async def get_execution_logs(
 
 
 @app.post("/api/generate-iam-policy")
-async def generate_iam_policy(current_user: dict = Depends(get_current_user)):
+def generate_iam_policy(current_user: dict = Depends(get_current_user)):
     logger.info("Serving IAM policy to %s", current_user["uid"])
     static_policy = {
         "Version": "2012-10-17",
@@ -1258,7 +1375,7 @@ async def generate_iam_policy(current_user: dict = Depends(get_current_user)):
 
 
 @app.post("/api/alerts/config")
-async def create_alert_config(
+def create_alert_config(
     request: AlertConfigRequest,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1306,7 +1423,7 @@ async def create_alert_config(
 
 
 @app.get("/api/alerts/config")
-async def get_alert_configs(
+def get_alert_configs(
     current_user: dict = Depends(get_current_user), db: Session = Depends(get_db)
 ):
     try:
@@ -1336,7 +1453,7 @@ async def get_alert_configs(
 
 
 @app.delete("/api/alerts/config/{config_id}")
-async def delete_alert_config(
+def delete_alert_config(
     config_id: str,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1364,7 +1481,7 @@ async def delete_alert_config(
 
 
 @app.post("/api/alerts/evaluate")
-async def evaluate_alerts(
+def evaluate_alerts(
     request: AlertEvaluateRequest,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1461,7 +1578,7 @@ async def evaluate_alerts(
 
 
 @app.get("/api/alerts/triggered")
-async def get_triggered_alerts(
+def get_triggered_alerts(
     limit: int = Query(100, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1502,7 +1619,7 @@ async def get_triggered_alerts(
 
 
 @app.post("/api/humanize")
-async def humanize(
+def humanize(
     request: HumanizeRequest, current_user: dict = Depends(rate_limit(30, 300, "humanize"))
 ):
     try:
@@ -1516,7 +1633,7 @@ async def humanize(
 
 
 @app.post("/api/action-logs")
-async def save_action_log(
+def save_action_log(
     request: ActionLogRequest,
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1546,7 +1663,7 @@ async def save_action_log(
 
 
 @app.get("/api/action-logs")
-async def get_action_logs(
+def get_action_logs(
     limit: int = Query(100, ge=1, le=500),
     current_user: dict = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -1578,7 +1695,7 @@ async def get_action_logs(
 
 
 @app.get("/api/health")
-async def health_check():
+def health_check():
     return {
         "status": "healthy",
         "service": "TUFF Backend",
@@ -1588,8 +1705,37 @@ async def health_check():
     }
 
 
+@app.get("/api/health/timing")
+def health_timing(
+    current_user: dict = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Split auth vs DB latency so slow reloads are diagnosable.
+
+    Auth cost is mostly paid inside ``get_current_user`` before this body runs;
+    ``auth_dependency_ms`` is only the residual. ``db_select_ms`` is a bare
+    ``SELECT 1`` against Supabase — if that alone is tens of seconds, the
+    pooler/network path is the bottleneck.
+    """
+    body_t0 = time.perf_counter()
+    db_t0 = time.perf_counter()
+    db.execute(text("SELECT 1"))
+    db_ms = (time.perf_counter() - db_t0) * 1000
+    return {
+        "status": "ok",
+        "uid": current_user.get("uid"),
+        "db_select_ms": round(db_ms, 1),
+        "handler_ms": round((time.perf_counter() - body_t0) * 1000, 1),
+        "hint": (
+            "Compare server log 'Firebase token verified … ms' (or cache hit) "
+            "with db_select_ms. Large db_select_ms ⇒ Supabase connect path; "
+            "large verify ms ⇒ Firebase/network."
+        ),
+    }
+
+
 @app.get("/")
-async def root():
+def root():
     return {
         "message": "TUFF Backend API",
         "health": "/api/health",

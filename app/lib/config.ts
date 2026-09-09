@@ -5,6 +5,8 @@ export const api = {
   baseURL: API_URL,
   endpoints: {
     userSync: `${API_URL}/api/user/sync`,
+    meBootstrap: `${API_URL}/api/me/bootstrap`,
+    healthTiming: `${API_URL}/api/health/timing`,
     analyze: `${API_URL}/api/analyze`,
     execute: `${API_URL}/api/execute`,
     alertsConfig: `${API_URL}/api/alerts/config`,
