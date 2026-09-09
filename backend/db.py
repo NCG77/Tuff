@@ -15,6 +15,17 @@ if not DATABASE_URL:
     logging.warning("DATABASE_URL is not set. Defaulting to ephemeral SQLite database.")
     DATABASE_URL = "sqlite:///./tuff_local.db"
 
+# Supabase transaction pooler (:6543) + SQLAlchemy's own pool causes slow,
+# flaky checkouts. Prefer session mode (:5432) or the direct db host.
+if ":6543" in DATABASE_URL:
+    import logging as _logging
+
+    _logging.getLogger(__name__).warning(
+        "DATABASE_URL uses port 6543 (transaction pooler). For FastAPI + "
+        "SQLAlchemy prefer session mode on port 5432 to avoid multi-second "
+        "connection stalls."
+    )
+
 _connect_args = {}
 _engine_kwargs = {
     "echo": False,
@@ -27,11 +38,14 @@ if DATABASE_URL.startswith("sqlite"):
     # knobs below are Postgres-specific and are skipped here.
     _connect_args["check_same_thread"] = False
 else:
+    # Session-mode Postgres: keep a small warm pool. Recycle before typical
+    # pooler idle timeouts so checkouts do not wait on a dead socket.
     _engine_kwargs.update(
         {
             "pool_size": 5,
             "max_overflow": 10,
-            "pool_recycle": 1800,
+            "pool_recycle": 300,
+            "pool_timeout": 30,
         }
     )
 

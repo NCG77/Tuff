@@ -5,12 +5,13 @@ rather than silently downgrading to an unauthenticated or unencrypted mode.
 """
 
 import base64
+import hashlib
 import logging
 import os
 import threading
 import time
 from collections import deque
-from typing import Deque, Dict, Optional
+from typing import Deque, Dict, Optional, Tuple
 from urllib.parse import urlparse
 
 from cryptography.hazmat.backends import default_backend
@@ -41,6 +42,52 @@ FIREBASE_ISSUER = f"https://securetoken.google.com/{FIREBASE_PROJECT_ID}" if FIR
 # clients with slightly wrong clocks working without meaningfully widening the
 # window in which a stolen token is usable.
 _CLOCK_SKEW_SECONDS = 30
+
+# Verified ID tokens are cached until near their exp so parallel dashboard
+# requests (and quick reloads) do not each pay a Firebase/Google cert round-trip.
+_TOKEN_CACHE_MAX = 2_048
+_TOKEN_CACHE_SKEW_SECONDS = 60
+_token_cache: Dict[str, Tuple[float, dict]] = {}
+_token_cache_lock = threading.Lock()
+
+
+def _token_cache_key(token: str) -> str:
+    return hashlib.sha256(token.encode("utf-8")).hexdigest()
+
+
+def _token_cache_get(token: str) -> Optional[dict]:
+    key = _token_cache_key(token)
+    now = time.time()
+    with _token_cache_lock:
+        entry = _token_cache.get(key)
+        if entry is None:
+            return None
+        expires_at, claims = entry
+        if expires_at <= now:
+            _token_cache.pop(key, None)
+            return None
+        return dict(claims)
+
+
+def _token_cache_put(token: str, claims: dict) -> None:
+    exp = claims.get("exp")
+    try:
+        expires_at = float(exp) - _TOKEN_CACHE_SKEW_SECONDS if exp is not None else time.time() + 300
+    except (TypeError, ValueError):
+        expires_at = time.time() + 300
+    if expires_at <= time.time():
+        return
+    key = _token_cache_key(token)
+    with _token_cache_lock:
+        if len(_token_cache) >= _TOKEN_CACHE_MAX:
+            # Drop roughly the oldest half by expiry rather than scanning all keys
+            # on every put under load.
+            for stale_key, (stale_exp, _) in list(_token_cache.items())[: _TOKEN_CACHE_MAX // 2]:
+                if stale_exp <= time.time() + 1:
+                    _token_cache.pop(stale_key, None)
+            if len(_token_cache) >= _TOKEN_CACHE_MAX:
+                _token_cache.clear()
+        _token_cache[key] = (expires_at, dict(claims))
 
 
 # ---------------------------------------------------------------------------
@@ -184,10 +231,15 @@ def _verify_with_google_certs(token: str) -> dict:
     return claims
 
 
-async def get_current_user(
+def get_current_user(
     credentials: HTTPAuthorizationCredentials = Security(bearer_scheme),
 ) -> dict:
     """Resolve the caller's verified Firebase identity.
+
+    Sync on purpose: ``verify_id_token`` and the Google-certs fallback both do
+    blocking network I/O. Declaring this ``async`` ran that work on the event
+    loop and wedged every in-flight request (including /api/user/sync), which
+    left the UI stuck at 0 credits after signup.
 
     Verification is always cryptographic. There is deliberately no
     decode-without-verify path: an unsigned payload is trivially forgeable and
@@ -201,20 +253,33 @@ async def get_current_user(
         )
 
     token = credentials.credentials
+    t0 = time.perf_counter()
+
+    cached = _token_cache_get(token)
+    if cached is not None:
+        logger.debug(
+            "Firebase token cache hit (%.1fms)",
+            (time.perf_counter() - t0) * 1000,
+        )
+        return cached
+
     claims: Optional[dict] = None
     failure: Optional[Exception] = None
+    verify_path = "none"
 
     if _firebase_admin_ready:
         try:
             claims = firebase_auth.verify_id_token(
                 token, clock_skew_seconds=_CLOCK_SKEW_SECONDS
             )
+            verify_path = "admin_sdk"
         except Exception as exc:
             failure = exc
 
     if claims is None:
         try:
             claims = _verify_with_google_certs(token)
+            verify_path = "google_certs"
         except Exception as exc:
             failure = failure or exc
             logger.info("Rejected request with invalid ID token: %s", exc)
@@ -233,6 +298,12 @@ async def get_current_user(
         )
 
     claims["uid"] = uid
+    _token_cache_put(token, claims)
+    logger.info(
+        "Firebase token verified via %s in %.0fms",
+        verify_path,
+        (time.perf_counter() - t0) * 1000,
+    )
     return claims
 
 

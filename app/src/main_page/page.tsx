@@ -28,6 +28,11 @@ import {
   setPreferredRegion,
 } from "@/app/lib/credentials";
 import { sumSavings } from "@/app/lib/format";
+import {
+  clearDashboardCache,
+  readDashboardCache,
+  writeDashboardCache,
+} from "@/app/lib/sessionCache";
 import type {
   ActionRecord,
   AlertConfig,
@@ -46,6 +51,47 @@ const TAB_TITLES: Record<DashboardTab, string> = {
   alerts: "Alert Configuration & History",
   help: "Help & Documentation",
 };
+
+type ProfileSlice = { tier: string; credits: number };
+type AlertsSlice = { configs: AlertConfig[]; triggered: TriggeredAlert[] };
+type LogsSlice = ActionRecord[];
+
+function mapActionLogs(logs: Array<Record<string, string>> | undefined): ActionRecord[] {
+  return (logs ?? []).map((log) => ({
+    id: log.id,
+    resourceId: log.resource_id,
+    action: log.action,
+    type: log.type,
+    timestamp: log.timestamp,
+  }));
+}
+
+function mapTriggeredAlerts(
+  alerts: Array<Record<string, unknown>> | undefined,
+): TriggeredAlert[] {
+  return (alerts ?? []).map((alert) => ({
+    id: alert.id as number,
+    configId: String(alert.configId ?? ""),
+    resourceId: String(alert.resourceId ?? ""),
+    resourceType: String(alert.resourceType ?? ""),
+    metric: String(alert.metric ?? ""),
+    value: Number(alert.value ?? 0),
+    threshold: Number(alert.threshold ?? 0),
+    condition: String(alert.condition ?? ""),
+    timestamp: String(alert.timestamp ?? ""),
+  }));
+}
+
+function mapAlertConfigs(configs: Array<Record<string, unknown>> | undefined): AlertConfig[] {
+  return (configs ?? []).map((c) => ({
+    id: String(c.id ?? ""),
+    resourceType: String(c.resourceType ?? ""),
+    metric: String(c.metric ?? ""),
+    threshold: Number(c.threshold ?? 0),
+    thresholdType: String(c.thresholdType ?? ""),
+    created_at: c.created_at ? String(c.created_at) : undefined,
+  }));
+}
 
 /**
  * Map a finding to the remediation the backend should run.
@@ -88,9 +134,10 @@ export default function MainPage() {
   const [triggeredAlerts, setTriggeredAlerts] = useState<TriggeredAlert[]>([]);
   const [pendingAlerts, setPendingAlerts] = useState<TriggeredAlert[]>([]);
 
-  // Bumped explicitly instead of keying the loader on `activeTab`, which
-  // refetched the whole profile on every sidebar click.
-  const [dataVersion, setDataVersion] = useState(0);
+  // Bumped to force a profile refresh after checkout (bypasses session cache).
+  const [profileVersion, setProfileVersion] = useState(0);
+  const [alertsLoadedFor, setAlertsLoadedFor] = useState<string | null>(null);
+  const [logsLoadedFor, setLogsLoadedFor] = useState<string | null>(null);
   const notifiedAlertIds = useRef(new Set<string>());
 
   useEffect(() => {
@@ -106,64 +153,177 @@ export default function MainPage() {
     };
   }, [user]);
 
+  // Landing: credits/tier only — one auth + one DB round-trip.
   useEffect(() => {
-    let cancelled = false;
+    if (!user) return;
 
-    const loadUserData = async () => {
-      const headers = await authHeaders();
-      if (!headers) return;
+    let cancelled = false;
+    const uid = user.uid;
+
+    const loadProfile = async () => {
+      if (profileVersion === 0) {
+        const cached = readDashboardCache<ProfileSlice>(uid, "profile");
+        if (cached) {
+          setTier(cached.tier);
+          setCredits(cached.credits);
+          return;
+        }
+      }
+
+      const token = await user.getIdToken();
+      if (cancelled) return;
 
       try {
-        const [syncRes, alertsRes, logsRes, triggeredRes] = await Promise.all([
-          fetch(api.endpoints.userSync, { method: "POST", headers }).catch(() => null),
-          fetch(api.endpoints.alertsConfig, { headers }).catch(() => null),
-          fetch(api.endpoints.actionLogs, { headers }).catch(() => null),
-          fetch(api.endpoints.alertsTriggered, { headers }).catch(() => null),
-        ]);
+        const res = await fetch(`${api.endpoints.meBootstrap}?include=profile`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }).catch(() => null);
         if (cancelled) return;
 
-        if (syncRes?.ok) {
-          const syncData = await syncRes.json();
-          setTier(syncData.tier ?? "free");
-          setCredits(syncData.credits ?? 0);
-        } else if (syncRes) {
+        if (res?.ok) {
+          const data = await res.json();
+          if (cancelled) return;
+          const tierValue = data.profile?.tier ?? "free";
+          const creditsValue =
+            typeof data.profile?.credits === "number" ? data.profile.credits : 0;
+          setTier(tierValue);
+          setCredits(creditsValue);
+          writeDashboardCache<ProfileSlice>(uid, "profile", {
+            tier: tierValue,
+            credits: creditsValue,
+          });
+          if (typeof data.timing_ms === "number") {
+            devLog(`bootstrap profile ${data.timing_ms}ms`);
+          }
+        } else if (res) {
           setError(
-            await extractErrorMessage(syncRes, "Could not load your profile. Some features may be unavailable."),
+            await extractErrorMessage(
+              res,
+              "Could not load your profile. Some features may be unavailable.",
+            ),
           );
-        }
-
-        if (alertsRes?.ok) {
-          const alertsData = await alertsRes.json();
-          setAlertConfigs(alertsData.configs ?? []);
-        }
-
-        if (logsRes?.ok) {
-          const logsData = await logsRes.json();
-          setActionHistory(
-            (logsData.logs ?? []).map((log: Record<string, string>) => ({
-              id: log.id,
-              resourceId: log.resource_id,
-              action: log.action,
-              type: log.type,
-              timestamp: log.timestamp,
-            })),
-          );
-        }
-
-        if (triggeredRes?.ok) {
-          const triggeredData = await triggeredRes.json();
-          setTriggeredAlerts(triggeredData.alerts ?? []);
         }
       } catch (err) {
-        if (!cancelled) devError("Failed to load user data:", err);
+        if (!cancelled) devError("Failed to load profile:", err);
       }
     };
 
-    loadUserData();
+    loadProfile();
     return () => {
       cancelled = true;
     };
-  }, [authHeaders, dataVersion]);
+  }, [user?.uid, profileVersion]);
+
+  // Alerts tab (and after a scan): load configs + history in one bootstrap call.
+  useEffect(() => {
+    if (!user) return;
+    const shouldLoad = activeTab === "alerts" || findings.length > 0;
+    if (!shouldLoad) return;
+    if (alertsLoadedFor === user.uid) return;
+
+    let cancelled = false;
+    const uid = user.uid;
+
+    const loadAlerts = async () => {
+      const cached = readDashboardCache<AlertsSlice>(uid, "alerts");
+      if (cached) {
+        setAlertConfigs(cached.configs);
+        setTriggeredAlerts(cached.triggered);
+        setAlertsLoadedFor(uid);
+        return;
+      }
+
+      const token = await user.getIdToken();
+      if (cancelled) return;
+
+      try {
+        const res = await fetch(`${api.endpoints.meBootstrap}?include=alerts`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }).catch(() => null);
+        if (cancelled || !res) return;
+
+        if (res.ok) {
+          const data = await res.json();
+          if (cancelled) return;
+          const configs = mapAlertConfigs(data.alerts?.configs);
+          const triggered = mapTriggeredAlerts(data.alerts?.triggered);
+          setAlertConfigs(configs);
+          setTriggeredAlerts(triggered);
+          setAlertsLoadedFor(uid);
+          writeDashboardCache<AlertsSlice>(uid, "alerts", { configs, triggered });
+          if (typeof data.timing_ms === "number") {
+            devLog(`bootstrap alerts ${data.timing_ms}ms`);
+          }
+        } else {
+          setError(await extractErrorMessage(res, "Could not load your alerts."));
+        }
+      } catch (err) {
+        if (!cancelled) devError("Failed to load alerts:", err);
+      }
+    };
+
+    loadAlerts();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid, activeTab, findings.length, alertsLoadedFor]);
+
+  // Logs tab only.
+  useEffect(() => {
+    if (!user || activeTab !== "logs") return;
+    if (logsLoadedFor === user.uid) return;
+
+    let cancelled = false;
+    const uid = user.uid;
+
+    const loadLogs = async () => {
+      const cached = readDashboardCache<LogsSlice>(uid, "logs");
+      if (cached) {
+        setActionHistory(cached);
+        setLogsLoadedFor(uid);
+        return;
+      }
+
+      const token = await user.getIdToken();
+      if (cancelled) return;
+
+      try {
+        const res = await fetch(`${api.endpoints.meBootstrap}?include=logs`, {
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${token}`,
+          },
+        }).catch(() => null);
+        if (cancelled || !res) return;
+
+        if (res.ok) {
+          const data = await res.json();
+          if (cancelled) return;
+          const logs = mapActionLogs(data.logs);
+          setActionHistory(logs);
+          setLogsLoadedFor(uid);
+          writeDashboardCache<LogsSlice>(uid, "logs", logs);
+          if (typeof data.timing_ms === "number") {
+            devLog(`bootstrap logs ${data.timing_ms}ms`);
+          }
+        } else {
+          setError(await extractErrorMessage(res, "Could not load your action history."));
+        }
+      } catch (err) {
+        if (!cancelled) devError("Failed to load logs:", err);
+      }
+    };
+
+    loadLogs();
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid, activeTab, logsLoadedFor]);
 
   const activeFindings = useMemo(
     () => findings.filter((f) => !dismissed.has(f.uid)),
@@ -430,7 +590,15 @@ export default function MainPage() {
         return;
       }
 
-      if (typeof data.credits_remaining === "number") setCredits(data.credits_remaining);
+      if (typeof data.credits_remaining === "number") {
+        setCredits(data.credits_remaining);
+        if (user?.uid) {
+          writeDashboardCache<ProfileSlice>(user.uid, "profile", {
+            tier,
+            credits: data.credits_remaining,
+          });
+        }
+      }
 
       const all: Finding[] = data.data;
       if (resourceType === "all") {
@@ -815,7 +983,15 @@ export default function MainPage() {
             <AwsConnectForm
               onScanComplete={handleScanSuccess}
               onTokenLimit={() => setIsPricingModalOpen(true)}
-              onCreditsChange={setCredits}
+              onCreditsChange={(next) => {
+                setCredits(next);
+                if (user?.uid) {
+                  writeDashboardCache<ProfileSlice>(user.uid, "profile", {
+                    tier,
+                    credits: next,
+                  });
+                }
+              }}
             />
           </div>
         )}
@@ -859,7 +1035,16 @@ export default function MainPage() {
           setCredits(newCredits);
           setTier(newTier);
           setNotice("You're on Tuff Pro. Enjoy your extra AI credits.");
-          setDataVersion((v) => v + 1);
+          if (user?.uid) {
+            clearDashboardCache(user.uid);
+            writeDashboardCache<ProfileSlice>(user.uid, "profile", {
+              tier: newTier,
+              credits: newCredits,
+            });
+          }
+          setAlertsLoadedFor(null);
+          setLogsLoadedFor(null);
+          setProfileVersion((v) => v + 1);
         }}
       />
     </div>
