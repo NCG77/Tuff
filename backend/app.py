@@ -782,6 +782,49 @@ def _scan_region(access_key: str, secret_key: str, region: str) -> list:
     return engine.execute_full_scan()
 
 
+def _list_enabled_regions(access_key: str, secret_key: str) -> list:
+    """Regions to scan for region=all.
+
+    Prefer ``ec2:DescribeRegions`` so we only hit regions the account has
+    opted into. If that permission is missing (common on tightly scoped IAM
+    users), fall back to botocore's built-in commercial region list — individual
+    region scans already tolerate AccessDenied / opt-in errors.
+    """
+    import boto3
+    from botocore.exceptions import BotoCoreError, ClientError
+
+    session = boto3.Session(
+        aws_access_key_id=access_key,
+        aws_secret_access_key=secret_key,
+        region_name="us-east-1",
+    )
+
+    try:
+        ec2_client = session.client("ec2")
+        regions = sorted(r["RegionName"] for r in ec2_client.describe_regions()["Regions"])
+        if regions:
+            return regions
+    except (ClientError, BotoCoreError) as e:
+        code = ""
+        if isinstance(e, ClientError):
+            code = e.response.get("Error", {}).get("Code", "")
+        logger.warning(
+            "ec2:DescribeRegions unavailable (%s); falling back to botocore region list",
+            code or e,
+        )
+
+    fallback = sorted(session.get_available_regions("ec2") or [])
+    if not fallback:
+        # Last resort hard-coded commercial set if botocore data is missing.
+        fallback = [
+            "us-east-1", "us-east-2", "us-west-1", "us-west-2",
+            "eu-west-1", "eu-west-2", "eu-central-1",
+            "ap-south-1", "ap-southeast-1", "ap-southeast-2", "ap-northeast-1",
+            "ca-central-1", "sa-east-1",
+        ]
+    return fallback
+
+
 @app.post("/api/analyze")
 def analyze_infrastructure(
     request: ScanRequest,
@@ -807,7 +850,13 @@ def analyze_infrastructure(
         if affordable < 1:
             raise HTTPException(
                 status_code=402,
-                detail="You have used all your free AI credits. Upgrade to Pro to continue analysing findings.",
+                detail={
+                    "code": "TUFF_CREDITS_EXHAUSTED",
+                    "message": (
+                        "You have used all your free AI credits. "
+                        "Upgrade to Pro to continue analysing findings."
+                    ),
+                },
             )
     else:
         affordable = MAX_FINDINGS_PER_SCAN
@@ -818,21 +867,8 @@ def analyze_infrastructure(
 
     try:
         if request.region == "all":
-            try:
-                import boto3
-
-                ec2_client = boto3.Session(
-                    aws_access_key_id=access_key,
-                    aws_secret_access_key=secret_key,
-                    region_name="us-east-1",
-                ).client("ec2")
-                regions = [r["RegionName"] for r in ec2_client.describe_regions()["Regions"]]
-            except Exception:
-                logger.warning("Could not enumerate AWS regions", exc_info=True)
-                raise HTTPException(
-                    status_code=400,
-                    detail="Could not list your AWS regions. Check the credentials and that ec2:DescribeRegions is allowed.",
-                )
+            regions = _list_enabled_regions(access_key, secret_key)
+            logger.info("All-regions scan will cover %s region(s)", len(regions))
         else:
             regions = [request.region]
 
@@ -892,14 +928,21 @@ def analyze_infrastructure(
                 if err
                 and any(
                     marker in err
-                    for marker in ("ERROR_QUOTA_EXCEEDED", "ERROR_INSUFFICIENT_FUNDS", "ERROR_SESSION_LIMIT_EXCEEDED")
+                    for marker in ("ERROR_QUOTA_EXCEEDED", "ERROR_SESSION_LIMIT_EXCEEDED")
                 )
             ),
             None,
         )
+        upstream_error = next(
+            (
+                err
+                for _, _, _, err in results
+                if err and "ERROR_UPSTREAM_API" in err
+            ),
+            None,
+        )
         if quota_error and not any(analysis for _, analysis, _, _ in results):
-            # Every AI call failed for the same quota reason: surface it rather
-            # than returning an empty, apparently-clean report.
+            # Provider rate limit — not a Tuff Pro upsell.
             _log_scan_failure(db, scan_id, user_id, request.region, quota_error)
             if "ERROR_INSUFFICIENT_FUNDS" in quota_error:
                 raise HTTPException(status_code=503, detail="The AI provider is temporarily unavailable. Please try again later.")
@@ -987,6 +1030,10 @@ def analyze_infrastructure(
 
 def _build_finding_payload(finding: dict, analysis: dict, requested_region: str) -> dict:
     metrics = finding.get("metrics", {}) or {}
+    # Prefer explicit finding flag; fall back to metrics for older scanners.
+    actionable = finding.get("actionable")
+    if actionable is None:
+        actionable = metrics.get("actionable", True)
     return {
         "uid": finding_uid(finding["resource_id"], finding["issue"]),
         "id": finding["resource_id"],
@@ -1002,6 +1049,9 @@ def _build_finding_payload(finding: dict, analysis: dict, requested_region: str)
         "business_impact": analysis.get("business_impact"),
         "recommended_action": analysis.get("recommended_action"),
         "priority": analysis.get("priority", "medium"),
+        "actionable": bool(actionable),
+        "blocking_dependencies": metrics.get("blocking_dependencies") or [],
+        "remediation_mode": metrics.get("remediation_mode"),
     }
 
 
@@ -1052,28 +1102,38 @@ def execute_remediation(
         resource_id = request.resource_id
 
         if request.action_type == "stop_instance":
+            aws_engine.assert_instance_stoppable(resource_id)
             aws_engine.client("ec2").stop_instances(InstanceIds=[resource_id])
             msg = f"Stopped idle EC2 instance {resource_id}."
 
         elif request.action_type == "delete_instance":
+            aws_engine.assert_instance_terminable(resource_id)
             aws_engine.client("ec2").terminate_instances(InstanceIds=[resource_id])
             msg = f"Terminated EC2 instance {resource_id}."
 
         elif request.action_type == "delete_volume":
+            aws_engine.assert_volume_deletable(resource_id)
             aws_engine.client("ec2").delete_volume(VolumeId=resource_id)
             msg = f"Deleted unattached EBS volume {resource_id}."
 
         elif request.action_type == "delete_vpc":
-            aws_engine.client("ec2").delete_vpc(VpcId=resource_id)
-            msg = f"Deleted unused VPC {resource_id}."
+            msg = aws_engine.delete_vpc_safely(resource_id)
 
         elif request.action_type == "stop_rds":
+            aws_engine.assert_rds_stoppable(resource_id)
             aws_engine.client("rds").stop_db_instance(DBInstanceIdentifier=resource_id)
             msg = f"Stopped idle RDS instance {resource_id}. Storage is still billed while stopped."
 
         elif request.action_type == "delete_rds":
             # A final snapshot is taken unconditionally. The previous
             # SkipFinalSnapshot=True destroyed the only copy of the data.
+            pages = aws_engine.client("rds").describe_db_instances(DBInstanceIdentifier=resource_id)
+            databases = pages.get("DBInstances") or []
+            if databases and databases[0].get("DeletionProtection"):
+                raise RuntimeError(
+                    f"RDS {resource_id} has deletion protection enabled. "
+                    "Disable it in AWS, then retry."
+                )
             snapshot_id = f"tuff-final-{resource_id[:30]}-{utcnow().strftime('%Y%m%d%H%M%S')}"
             aws_engine.client("rds").delete_db_instance(
                 DBInstanceIdentifier=resource_id,
@@ -1095,6 +1155,7 @@ def execute_remediation(
             msg = f"Enabled Public Access Block on S3 bucket {resource_id}."
 
         elif request.action_type == "scale_instance":
+            aws_engine.assert_instance_stoppable(resource_id)
             ec2 = aws_engine.client("ec2")
             # `target_type` is Optional and defaults to None, so falling back
             # with `or` is required; getattr's default never applied because
@@ -1142,10 +1203,15 @@ def execute_remediation(
         _safe_rollback(db)
 
         # AWS explains refusals precisely ("UnauthorizedOperation",
-        # "VolumeInUse"), which is exactly what the user needs to see, but
-        # anything else is kept server-side.
+        # "VolumeInUse"), which is exactly what the user needs to see.
+        # Pre-flight RuntimeErrors from Tuff should also reach the UI.
         aws_message = getattr(e, "response", {}).get("Error", {}).get("Message") if hasattr(e, "response") else None
-        user_message = aws_message or "The remediation could not be completed. Please check the Logs tab."
+        if aws_message:
+            user_message = aws_message
+        elif isinstance(e, RuntimeError):
+            user_message = str(e)
+        else:
+            user_message = "The remediation could not be completed. Please check the Logs tab."
 
         try:
             db.add(
@@ -1288,11 +1354,21 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                 "Effect": "Allow",
                 "Action": [
                     "ec2:DescribeInstances",
+                    "ec2:DescribeInstanceAttribute",
                     "ec2:DescribeRegions",
                     "ec2:DescribeVolumes",
                     "ec2:DescribeVpcs",
+                    "ec2:DescribeSubnets",
                     "ec2:DescribeNetworkInterfaces",
                     "ec2:DescribeNatGateways",
+                    "ec2:DescribeInternetGateways",
+                    "ec2:DescribeEgressOnlyInternetGateways",
+                    "ec2:DescribeRouteTables",
+                    "ec2:DescribeSecurityGroups",
+                    "ec2:DescribeNetworkAcls",
+                    "ec2:DescribeVpcEndpoints",
+                    "ec2:DescribeVpcPeeringConnections",
+                    "ec2:DescribeVpnGateways",
                     "rds:DescribeDBInstances",
                     "s3:ListAllMyBuckets",
                     "s3:GetBucketPublicAccessBlock",
@@ -1312,6 +1388,14 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "ec2:TerminateInstances",
                     "ec2:DeleteVolume",
                     "ec2:DeleteVpc",
+                    "ec2:DeleteSubnet",
+                    "ec2:DeleteInternetGateway",
+                    "ec2:DetachInternetGateway",
+                    "ec2:DeleteEgressOnlyInternetGateway",
+                    "ec2:DeleteRouteTable",
+                    "ec2:DisassociateRouteTable",
+                    "ec2:DeleteSecurityGroup",
+                    "ec2:DeleteNetworkAcl",
                     "ec2:ModifyInstanceAttribute",
                     "rds:StopDBInstance",
                     "rds:DeleteDBInstance",
@@ -1322,6 +1406,12 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "arn:aws:ec2:*:*:instance/*",
                     "arn:aws:ec2:*:*:volume/*",
                     "arn:aws:ec2:*:*:vpc/*",
+                    "arn:aws:ec2:*:*:subnet/*",
+                    "arn:aws:ec2:*:*:internet-gateway/*",
+                    "arn:aws:ec2:*:*:egress-only-internet-gateway/*",
+                    "arn:aws:ec2:*:*:route-table/*",
+                    "arn:aws:ec2:*:*:security-group/*",
+                    "arn:aws:ec2:*:*:network-acl/*",
                     "arn:aws:rds:*:*:db:*",
                     "arn:aws:rds:*:*:snapshot:*",
                     "arn:aws:s3:::*"
@@ -1364,7 +1454,11 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
         "description": "IAM permissions required for TUFF scanning and remediation",
         "note": (
             "Scanning only needs the TUFFReadOnlyAccess statement. Remove the other "
-            "statements if you never want Tuff to be able to change your infrastructure."
+            "statements if you never want Tuff to be able to change your infrastructure. "
+            "Include ec2:DescribeRegions so All Regions can discover account-enabled "
+            "regions; without it Tuff falls back to a built-in region list. "
+            "VPC cleanup also needs the extra Describe* and DeleteSubnet / "
+            "DetachInternetGateway-style actions in this policy."
         ),
     })
 

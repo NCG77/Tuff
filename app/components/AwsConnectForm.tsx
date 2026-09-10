@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { api, devLog, extractErrorMessage, networkErrorMessage } from "@/app/lib/config";
+import { api, devLog, extractErrorMessage, networkErrorMessage, isTuffCreditsExhausted, parseErrorDetail } from "@/app/lib/config";
 import { useAuth } from "@/app/context/AuthContext";
 import {
   clearCredentials,
@@ -63,6 +63,7 @@ export default function AwsConnectForm({
   const [error, setError] = useState("");
   const [success, setSuccess] = useState("");
   const [generatingPolicy, setGeneratingPolicy] = useState(false);
+  const [policyJson, setPolicyJson] = useState<string | null>(null);
   const [showSlowNotice, setShowSlowNotice] = useState(false);
   const [hasStoredCredentials, setHasStoredCredentials] = useState(Boolean(initial.accessKey));
   const abortRef = useRef<AbortController | null>(null);
@@ -130,7 +131,13 @@ export default function AwsConnectForm({
           onTokenLimit();
           return;
         }
-        setError(await extractErrorMessage(response, "Tuff could not analyse your AWS account."));
+        const message =
+          typeof detail === "string"
+            ? detail
+            : detail && typeof detail === "object" && !Array.isArray(detail) && typeof (detail as { message?: unknown }).message === "string"
+              ? String((detail as { message: string }).message)
+              : bodyText.slice(0, 300);
+        setError(message || "Tuff could not analyse your AWS account.");
         return;
       }
 
@@ -179,52 +186,44 @@ export default function AwsConnectForm({
     setError("");
   };
 
-  const handleGenerateIAMPolicy = async () => {
+  const fetchIamPolicyJson = async (): Promise<string> => {
     if (!user) {
-      setError("Please sign in again to download the IAM policy.");
-      return;
+      throw new Error("Please sign in again to get the IAM policy.");
     }
+    const token = await user.getIdToken();
+    const response = await fetch(api.endpoints.generateIAMPolicy, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${token}`,
+      },
+    });
+    if (!response.ok) {
+      throw new Error(await extractErrorMessage(response, "Could not generate the IAM policy."));
+    }
+    const result = await response.json();
+    return JSON.stringify(result.policy, null, 2);
+  };
 
+  const handleCopyIAMPolicy = async () => {
     setGeneratingPolicy(true);
     setError("");
-
-    let url: string | null = null;
-    let link: HTMLAnchorElement | null = null;
+    setSuccess("");
     try {
-      const token = await user.getIdToken();
-      const response = await fetch(api.endpoints.generateIAMPolicy, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
-        },
-      });
-
-      if (!response.ok) {
-        setError(await extractErrorMessage(response, "Could not generate the IAM policy."));
-        return;
-      }
-
-      const result = await response.json();
-      const dataBlob = new Blob([JSON.stringify(result.policy, null, 2)], {
-        type: "application/json",
-      });
-      url = URL.createObjectURL(dataBlob);
-      link = document.createElement("a");
-      link.href = url;
-      link.download = `tuff-iam-policy-${new Date().toISOString().split("T")[0]}.json`;
-      document.body.appendChild(link);
-      link.click();
-
-      setSuccess("IAM policy downloaded. Attach it to a dedicated IAM user for Tuff.");
+      const json = policyJson || (await fetchIamPolicyJson());
+      setPolicyJson(json);
+      await navigator.clipboard.writeText(json);
+      setSuccess(
+        "IAM policy JSON copied. In AWS IAM → Users → your Tuff user → Add permissions → Create inline policy → JSON → paste → Next → Create.",
+      );
     } catch (err) {
-      devLog("IAM policy download failed", err);
-      setError(networkErrorMessage());
+      if (err instanceof Error && err.message) {
+        setError(err.message);
+      } else {
+        devLog("IAM policy copy failed", err);
+        setError(networkErrorMessage());
+      }
     } finally {
-      // Cleanup runs even when the click handler throws, so we don't leak the
-      // object URL or leave a stray anchor in the DOM.
-      if (link?.parentNode) link.parentNode.removeChild(link);
-      if (url) URL.revokeObjectURL(url);
       setGeneratingPolicy(false);
     }
   };
@@ -412,7 +411,7 @@ export default function AwsConnectForm({
 
         <button
           type="button"
-          onClick={handleGenerateIAMPolicy}
+          onClick={handleCopyIAMPolicy}
           disabled={generatingPolicy}
           style={{
             width: "100%",
@@ -428,8 +427,74 @@ export default function AwsConnectForm({
             fontSize: "12px",
           }}
         >
-          {generatingPolicy ? "⟳ GENERATING..." : "DOWNLOAD IAM POLICY"}
+          {generatingPolicy ? "⟳ PREPARING…" : "COPY IAM POLICY JSON"}
         </button>
+
+        {policyJson && (
+          <div
+            style={{
+              display: "flex",
+              flexDirection: "column",
+              gap: "8px",
+              marginTop: "4px",
+            }}
+          >
+            <div
+              style={{
+                display: "flex",
+                justifyContent: "space-between",
+                alignItems: "center",
+              }}
+            >
+              <span
+                style={{
+                  fontSize: "11px",
+                  fontWeight: 600,
+                  color: "#5a7a9e",
+                  textTransform: "uppercase",
+                  letterSpacing: ".08em",
+                }}
+              >
+                IAM policy JSON
+              </span>
+              <button
+                type="button"
+                onClick={() => setPolicyJson(null)}
+                aria-label="Close IAM policy preview"
+                style={{
+                  background: "transparent",
+                  border: "none",
+                  color: "#8b7355",
+                  cursor: "pointer",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                  padding: "2px 6px",
+                }}
+              >
+                Close ✕
+              </button>
+            </div>
+            <textarea
+              readOnly
+              aria-label="IAM policy JSON"
+              value={policyJson}
+              onFocus={(e) => e.currentTarget.select()}
+              style={{
+                width: "100%",
+                minHeight: "120px",
+                fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+                fontSize: "11px",
+                lineHeight: 1.4,
+                padding: "10px",
+                borderRadius: "4px",
+                border: "1px solid rgba(139, 115, 85, 0.35)",
+                background: "rgba(255,255,255,0.92)",
+                color: "#1a1a1a",
+                resize: "vertical",
+              }}
+            />
+          </div>
+        )}
 
         {hasStoredCredentials && (
           <button
@@ -457,7 +522,7 @@ export default function AwsConnectForm({
       <p style={{ fontSize: "11px", color: "#8b7355", marginTop: "16px", lineHeight: 1.6 }}>
         Keys are held only for this browser tab and are cleared when you sign out or close it.
         {!isEncryptionConfigured && " Set NEXT_PUBLIC_ENCRYPTION_KEY to encrypt them at rest."} Use a
-        dedicated IAM user with the downloadable policy above rather than your root credentials.
+        dedicated IAM user with the policy JSON above rather than your root credentials.
       </p>
     </div>
   );

@@ -21,7 +21,7 @@ import {
   LogOut,
   ShieldAlert,
 } from "lucide-react";
-import { api, devLog, devError, extractErrorMessage, networkErrorMessage } from "@/app/lib/config";
+import { api, devLog, devError, extractErrorMessage, networkErrorMessage, isTuffCreditsExhausted, parseErrorDetail } from "@/app/lib/config";
 import {
   getPreferredRegion,
   loadEncryptedCredentials,
@@ -107,6 +107,8 @@ function defaultActionFor(finding: Finding): string {
   // Stopping an idle database is reversible; deleting it is not.
   if (type.includes("RDS")) return "stop_rds";
   if (type.includes("VPC")) return "delete_vpc";
+  // Already stopped — terminate (after user confirms) rather than stop again.
+  if (type.includes("Stopped")) return "delete_instance";
   return "stop_instance";
 }
 
@@ -453,6 +455,16 @@ export default function MainPage() {
     const targetFinding = findings.find((f) => f.uid === uid);
     if (!targetFinding) return;
 
+    if (
+      !actionTypeOverride &&
+      (targetFinding.actionable === false || targetFinding.metrics?.actionable === false)
+    ) {
+      setError(
+        "This finding is informational or blocked by dependencies. Tuff will not change the resource.",
+      );
+      return;
+    }
+
     const headers = await authHeaders();
     if (!headers || !user) {
       setError("Your session expired. Please sign in again.");
@@ -580,7 +592,14 @@ export default function MainPage() {
           setIsPricingModalOpen(true);
           return;
         }
-        setError(await extractErrorMessage(response, `Failed to scan ${resourceType} resources.`));
+        let message = `Failed to scan ${resourceType} resources.`;
+        if (typeof detail === "string" && detail.trim()) {
+          message = detail;
+        } else if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+          const nested = (detail as { message?: unknown }).message;
+          if (typeof nested === "string" && nested.trim()) message = nested;
+        }
+        setError(message);
         return;
       }
 

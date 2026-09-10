@@ -38,12 +38,33 @@ function actionSummary(finding: Finding): string {
   if (type.includes("Scaling"))
     return `stop ${finding.id}, resize it to ${finding.metrics?.suggested_type ?? "t3.micro"}, and start it again`;
   if (type.includes("RDS")) return `stop database ${finding.id}`;
-  if (type.includes("VPC")) return `delete VPC ${finding.id}`;
+  if (type.includes("VPC")) {
+    const cleanup = (finding.metrics?.cleanup_items as string[] | undefined) || [];
+    if (cleanup.length) {
+      return `run ordered cleanup (${cleanup.join(", ")}) then delete VPC ${finding.id}`;
+    }
+    return `delete VPC ${finding.id}`;
+  }
+  if (type.includes("Stopped")) return `permanently terminate stopped instance ${finding.id}`;
+  if (type.includes("Unmonitored")) return `stop instance ${finding.id} after you confirm it is unused`;
   return `stop instance ${finding.id}`;
 }
 
 function isDestructive(finding: Finding): boolean {
-  return ["Volume", "VPC"].some((t) => finding.type.includes(t));
+  return ["Volume", "VPC", "Stopped"].some((t) => finding.type.includes(t));
+}
+
+function isActionable(finding: Finding): boolean {
+  if (finding.requires_upgrade) return false;
+  if (finding.actionable === false) return false;
+  if (finding.metrics?.actionable === false) return false;
+  return true;
+}
+
+function blockerLines(finding: Finding): string[] {
+  const fromFinding = finding.blocking_dependencies || [];
+  const fromMetrics = (finding.metrics?.blocking_dependencies as string[] | undefined) || [];
+  return fromFinding.length ? fromFinding : fromMetrics;
 }
 
 export default function FindingsPanel({
@@ -138,6 +159,9 @@ export default function FindingsPanel({
   const allCount = visibleFindings.length;
 
   const requestApproval = (finding: Finding, actionType?: string, targetType?: string) => {
+    if (!isActionable(finding) && !actionType) {
+      return;
+    }
     const message = actionType === "delete_instance"
       ? `Terminate instance ${finding.id}? This is irreversible and all data on its instance store will be lost.`
       : `Tuff will ${actionSummary(finding)}. Continue?`;
@@ -266,16 +290,40 @@ export default function FindingsPanel({
                   <span className={styles.executingStatus}>⚙ EXECUTING...</span>
                 ) : (
                   <>
-                    <button
-                      className={styles.approveBtn}
-                      onClick={() => requestApproval(f)}
-                      title={`Tuff will ${actionSummary(f)}`}
-                    >
-                      {f.type.includes("Scaling")
-                        ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
-                        : "Approve"}
-                    </button>
-                    {f.type.includes("EC2") && (
+                    {isActionable(f) ? (
+                      <button
+                        className={styles.approveBtn}
+                        onClick={() => requestApproval(f)}
+                        title={`Tuff will ${actionSummary(f)}`}
+                      >
+                        {f.type.includes("Scaling")
+                          ? `Scale to ${f.metrics?.suggested_type || "t3.micro"}`
+                          : f.type.includes("VPC")
+                            ? "Approve cleanup"
+                            : "Approve"}
+                      </button>
+                    ) : (
+                      <span
+                        title={
+                          blockerLines(f).length
+                            ? `Blocked: ${blockerLines(f).join(", ")}`
+                            : "Informational only — Tuff will not change this resource"
+                        }
+                        style={{
+                          color: "rgba(237, 224, 206, 0.55)",
+                          fontSize: "11px",
+                          fontWeight: 600,
+                          textTransform: "uppercase",
+                          letterSpacing: "0.04em",
+                          padding: "6px 8px",
+                        }}
+                      >
+                        {f.metrics?.is_default || f.remediation_mode === "informational"
+                          ? "Info only"
+                          : "Blocked"}
+                      </span>
+                    )}
+                    {isActionable(f) && f.type.includes("EC2") && (
                       <select
                         aria-label={`Choose another action for ${f.id}`}
                         defaultValue=""
@@ -485,6 +533,45 @@ export default function FindingsPanel({
                   <p className={styles.insightText}>{selectedFinding.recommended_action}</p>
                 </div>
               )}
+
+              {blockerLines(selectedFinding).length > 0 && (
+                <div
+                  className={styles.insightBox}
+                  style={{ background: "rgba(180, 90, 60, 0.12)", border: "1px solid rgba(180, 90, 60, 0.45)" }}
+                >
+                  <div className={styles.insightLabel} style={{ color: "#c47a5a" }}>
+                    Blocking Dependencies
+                  </div>
+                  <ul className={styles.insightText} style={{ margin: "8px 0 0", paddingLeft: "18px" }}>
+                    {blockerLines(selectedFinding).map((item) => (
+                      <li key={item}>{item}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+
+              {!isActionable(selectedFinding) &&
+                selectedFinding.type.includes("VPC") &&
+                (selectedFinding.metrics?.is_default ||
+                  selectedFinding.remediation_mode === "informational") && (
+                <div className={styles.insightBox}>
+                  <div className={styles.insightLabel}>Remediation</div>
+                  <p className={styles.insightText}>
+                    Informational only — Tuff will not delete the default VPC. Dismiss if you do not need this reminder.
+                  </p>
+                </div>
+              )}
+
+              {isActionable(selectedFinding) &&
+                Array.isArray(selectedFinding.metrics?.cleanup_items) &&
+                (selectedFinding.metrics?.cleanup_items as string[]).length > 0 && (
+                <div className={styles.insightBox}>
+                  <div className={styles.insightLabel}>Cleanup Plan</div>
+                  <p className={styles.insightText}>
+                    Approve will remove: {(selectedFinding.metrics?.cleanup_items as string[]).join(", ")}, then delete the VPC.
+                  </p>
+                </div>
+              )}
             </div>
 
             <div className={styles.detailActions}>
@@ -492,15 +579,30 @@ export default function FindingsPanel({
                 <span className={styles.executingStatus}>⚙ EXECUTING...</span>
               ) : (
                 <>
-                  <button
-                    className={styles.detailApproveBtn}
-                    onClick={() => requestApproval(selectedFinding)}
-                    title={`Tuff will ${actionSummary(selectedFinding)}`}
-                  >
-                    {selectedFinding.type.includes("Scaling")
-                      ? `Approve Rightsizing (${selectedFinding.metrics?.suggested_type || "t3.micro"})`
-                      : "Approve & Execute"}
-                  </button>
+                  {isActionable(selectedFinding) ? (
+                    <button
+                      className={styles.detailApproveBtn}
+                      onClick={() => requestApproval(selectedFinding)}
+                      title={`Tuff will ${actionSummary(selectedFinding)}`}
+                    >
+                      {selectedFinding.type.includes("Scaling")
+                        ? `Approve Rightsizing (${selectedFinding.metrics?.suggested_type || "t3.micro"})`
+                        : selectedFinding.type.includes("VPC")
+                          ? "Approve Cleanup & Delete"
+                          : "Approve & Execute"}
+                    </button>
+                  ) : (
+                    <span
+                      style={{
+                        color: "rgba(237, 224, 206, 0.55)",
+                        fontSize: "12px",
+                        fontWeight: 600,
+                        alignSelf: "center",
+                      }}
+                    >
+                      No automated action available
+                    </span>
+                  )}
                   <button
                     className={styles.detailDismissBtn}
                     onClick={() => onDismiss(selectedFinding.uid, selectedFinding)}

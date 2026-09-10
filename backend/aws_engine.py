@@ -1,5 +1,6 @@
 import logging
 from datetime import datetime, timedelta, timezone
+from typing import Optional
 
 import boto3
 from botocore.config import Config
@@ -16,6 +17,12 @@ IDLE_CPU_PERCENT = 5.0
 IDLE_NETWORK_BYTES_PER_SEC = 1000
 RIGHTSIZE_CPU_PERCENT = 10.0
 MIN_VOLUME_AGE_DAYS = 7
+# Fresh instances often have no CloudWatch datapoints yet; skip those briefly
+# so we do not flag brand-new hosts. After this grace period, missing metrics
+# still surface as a finding so running EC2 is not silently invisible.
+MIN_INSTANCE_METRICS_AGE_HOURS = 24
+# Stopped instances still bill for attached EBS; ignore very recent stops.
+MIN_STOPPED_AGE_DAYS = 1
 
 # On-demand USD/hour for the instance families Tuff commonly encounters
 # (us-east-1 list prices). These are estimates used for ranking and for the
@@ -108,32 +115,115 @@ class AWSEngine:
         )
         return [point[statistic] for point in stats.get("Datapoints", [])]
 
-    def _running_instances(self, ec2_client) -> list:
+    def _instances_in_states(self, ec2_client, states: list) -> list:
         instances = []
         # Paginated: describe_instances truncates at 1000 reservations, so an
         # unpaginated call silently misses resources in larger accounts.
         for page in ec2_client.get_paginator("describe_instances").paginate(
-            Filters=[{"Name": "instance-state-name", "Values": ["running"]}]
+            Filters=[{"Name": "instance-state-name", "Values": states}]
         ):
             for reservation in page.get("Reservations", []):
                 instances.extend(reservation.get("Instances", []))
         return instances
+
+    def _running_instances(self, ec2_client) -> list:
+        return self._instances_in_states(ec2_client, ["running"])
+
+    def _attached_volume_monthly_cost(self, ec2_client, instances: list) -> dict:
+        """Map instance_id -> estimated monthly EBS cost for attached volumes."""
+        volume_ids = []
+        volume_to_instances: dict = {}
+        for instance in instances:
+            iid = instance["InstanceId"]
+            for mapping in instance.get("BlockDeviceMappings", []):
+                volume_id = (mapping.get("Ebs") or {}).get("VolumeId")
+                if not volume_id:
+                    continue
+                volume_ids.append(volume_id)
+                volume_to_instances.setdefault(volume_id, set()).add(iid)
+
+        costs = {instance["InstanceId"]: 0.0 for instance in instances}
+        # describe_volumes accepts at most 200 ids per call.
+        for i in range(0, len(volume_ids), 200):
+            chunk = volume_ids[i : i + 200]
+            try:
+                for page in ec2_client.get_paginator("describe_volumes").paginate(VolumeIds=chunk):
+                    for volume in page.get("Volumes", []):
+                        monthly = _monthly_ebs_cost(volume["Size"], volume["VolumeType"])
+                        for iid in volume_to_instances.get(volume["VolumeId"], ()):
+                            costs[iid] = round(costs.get(iid, 0.0) + monthly, 2)
+            except ClientError as e:
+                logger.info("Could not price attached volumes in %s: %s", self.region, e)
+                break
+        return costs
+
+    @staticmethod
+    def _instance_age_hours(instance: dict) -> Optional[float]:
+        launch = instance.get("LaunchTime")
+        if not launch:
+            return None
+        if launch.tzinfo is None:
+            launch = launch.replace(tzinfo=timezone.utc)
+        return (datetime.now(timezone.utc) - launch).total_seconds() / 3600.0
 
     def scan_zombie_ec2(self) -> list:
         ec2_client = self.client('ec2')
         cw_client = self.client('cloudwatch')
         findings = []
 
-        for instance in self._running_instances(ec2_client):
+        running = self._running_instances(ec2_client)
+        if running:
+            logger.info(
+                "EC2 idle scan in %s: evaluating %s running instance(s)",
+                self.region,
+                len(running),
+            )
+
+        for instance in running:
             instance_id = instance['InstanceId']
             instance_type = instance['InstanceType']
+            age_hours = self._instance_age_hours(instance)
 
             averages = self._metric_averages(
                 cw_client, 'AWS/EC2', 'CPUUtilization', [{'Name': 'InstanceId', 'Value': instance_id}]
             )
             if not averages:
-                # No telemetry means no evidence of waste. Reporting these as
-                # idle produced false positives on freshly launched hosts.
+                # Brand-new hosts often have no datapoints yet — skip briefly.
+                # After the grace window, still report them so a running EC2
+                # cannot disappear entirely from the dashboard.
+                if age_hours is not None and age_hours < MIN_INSTANCE_METRICS_AGE_HOURS:
+                    logger.info(
+                        "Skipping %s in %s: no CloudWatch CPU data yet (age=%.1fh)",
+                        instance_id,
+                        self.region,
+                        age_hours,
+                    )
+                    continue
+
+                findings.append({
+                    "resource_type": "EC2",
+                    "resource_id": instance_id,
+                    "issue": "Unmonitored Instance",
+                    "severity": "low",
+                    "metrics": {
+                        "instance_type": instance_type,
+                        "state": "running",
+                        "cpu_datapoints": 0,
+                        "observation_days": LOOKBACK_DAYS,
+                        "age_hours": round(age_hours, 1) if age_hours is not None else None,
+                        "actionable": True,
+                        "blocking_dependencies": [],
+                    },
+                    "region": self.region,
+                    "estimated_monthly_cost": _monthly_ec2_cost(instance_type),
+                    "recommendation": (
+                        "This instance is running but CloudWatch has no CPU utilization "
+                        "datapoints yet (or metrics are unavailable). Confirm the region, "
+                        "IAM cloudwatch:GetMetricStatistics permission, and whether the "
+                        "instance is still needed."
+                    ),
+                    "actionable": True,
+                })
                 continue
 
             net_in_avgs = self._metric_averages(
@@ -155,11 +245,63 @@ class AWSEngine:
                         "network_in_bytes_sec": round(max_net_in, 2),
                         "instance_type": instance_type,
                         "observation_days": LOOKBACK_DAYS,
+                        "actionable": True,
+                        "blocking_dependencies": [],
                     },
                     "region": self.region,
                     "estimated_monthly_cost": _monthly_ec2_cost(instance_type),
-                    "recommendation": "Consider stopping or downsizing this instance to save costs. Memory usage should also be verified if CloudWatch Agent is installed."
+                    "recommendation": "Consider stopping or downsizing this instance to save costs. Memory usage should also be verified if CloudWatch Agent is installed.",
+                    "actionable": True,
                 })
+        return findings
+
+    def scan_stopped_ec2(self) -> list:
+        """Flag stopped instances that still accrue attached EBS charges."""
+        ec2_client = self.client("ec2")
+        findings = []
+        stopped = self._instances_in_states(ec2_client, ["stopped"])
+        if not stopped:
+            return findings
+
+        logger.info(
+            "EC2 stopped scan in %s: evaluating %s stopped instance(s)",
+            self.region,
+            len(stopped),
+        )
+        ebs_costs = self._attached_volume_monthly_cost(ec2_client, stopped)
+
+        for instance in stopped:
+            instance_id = instance["InstanceId"]
+            instance_type = instance["InstanceType"]
+            age_hours = self._instance_age_hours(instance)
+            # LaunchTime is creation time, not stop time; still useful to avoid
+            # flagging instances that were just created and never started.
+            if age_hours is not None and age_hours < (MIN_STOPPED_AGE_DAYS * 24):
+                continue
+
+            ebs_monthly = ebs_costs.get(instance_id, 0.0)
+            findings.append({
+                "resource_type": "EC2",
+                "resource_id": instance_id,
+                "issue": "Stopped Instance",
+                "severity": "medium" if ebs_monthly > 0 else "low",
+                "metrics": {
+                    "instance_type": instance_type,
+                    "state": "stopped",
+                    "attached_ebs_monthly_usd": ebs_monthly,
+                    "actionable": True,
+                    "blocking_dependencies": [],
+                },
+                "region": self.region,
+                # Compute is not billed while stopped; attached EBS still is.
+                "estimated_monthly_cost": ebs_monthly,
+                "recommendation": (
+                    "This instance is stopped but attached EBS volumes still incur charges. "
+                    "Snapshot and terminate it if the workload is retired, or start it if "
+                    "it is still needed."
+                ),
+                "actionable": True,
+            })
         return findings
 
     def scan_zombie_ebs(self) -> list:
@@ -185,11 +327,14 @@ class AWSEngine:
                     "severity": "high",
                     "metrics": {
                         "size_gb": size_gb,
-                        "volume_type": volume_type
+                        "volume_type": volume_type,
+                        "actionable": True,
+                        "blocking_dependencies": [],
                     },
                     "region": self.region,
                     "estimated_monthly_cost": _monthly_ebs_cost(size_gb, volume_type),
-                    "recommendation": "Snapshot data if needed, then delete this orphaned volume immediately."
+                    "recommendation": "Snapshot data if needed, then delete this orphaned volume immediately.",
+                    "actionable": True,
                 })
         return findings
 
@@ -233,55 +378,362 @@ class AWSEngine:
                     "issue": "Public Access Block Disabled",
                     "severity": "critical",
                     "metrics": {
-                        "public_sharing_risk": "High"
+                        "public_sharing_risk": "High",
+                        "actionable": True,
+                        "blocking_dependencies": [],
                     },
                     "region": "global",
                     "estimated_monthly_cost": 0,
-                    "recommendation": "Enable Public Access Block configuration to secure bucket contents."
+                    "recommendation": "Enable Public Access Block configuration to secure bucket contents.",
+                    "actionable": True,
                 })
 
         return findings
 
+    def _vpc_dependency_inventory(self, ec2_client, vpc_id: str) -> dict:
+        """Collect what would block or need cleanup before DeleteVpc."""
+
+        def _ids(items, key):
+            return [item[key] for item in items if item.get(key)]
+
+        def _safe(label, fn):
+            try:
+                return fn()
+            except ClientError as e:
+                logger.info("VPC %s: could not list %s: %s", vpc_id, label, e)
+                return []
+
+        enis = _safe(
+            "network interfaces",
+            lambda: ec2_client.describe_network_interfaces(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("NetworkInterfaces", []),
+        )
+        nat_gateways = _safe(
+            "NAT gateways",
+            lambda: [
+                g
+                for g in ec2_client.describe_nat_gateways(
+                    Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+                ).get("NatGateways", [])
+                if g.get("State") not in ("deleted", "deleting")
+            ],
+        )
+        subnets = _safe(
+            "subnets",
+            lambda: ec2_client.describe_subnets(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("Subnets", []),
+        )
+        igws = _safe(
+            "internet gateways",
+            lambda: ec2_client.describe_internet_gateways(
+                Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]
+            ).get("InternetGateways", []),
+        )
+        egress_igws = _safe(
+            "egress-only internet gateways",
+            lambda: ec2_client.describe_egress_only_internet_gateways(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("EgressOnlyInternetGateways", []),
+        )
+        route_tables = _safe(
+            "route tables",
+            lambda: ec2_client.describe_route_tables(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("RouteTables", []),
+        )
+        security_groups = _safe(
+            "security groups",
+            lambda: ec2_client.describe_security_groups(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("SecurityGroups", []),
+        )
+        network_acls = _safe(
+            "network ACLs",
+            lambda: ec2_client.describe_network_acls(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("NetworkAcls", []),
+        )
+        endpoints = _safe(
+            "VPC endpoints",
+            lambda: ec2_client.describe_vpc_endpoints(
+                Filters=[{"Name": "vpc-id", "Values": [vpc_id]}]
+            ).get("VpcEndpoints", []),
+        )
+        peerings_raw = _safe(
+            "VPC peering connections (requester)",
+            lambda: ec2_client.describe_vpc_peering_connections(
+                Filters=[{"Name": "requester-vpc-info.vpc-id", "Values": [vpc_id]}]
+            ).get("VpcPeeringConnections", []),
+        ) + _safe(
+            "VPC peering connections (accepter)",
+            lambda: ec2_client.describe_vpc_peering_connections(
+                Filters=[{"Name": "accepter-vpc-info.vpc-id", "Values": [vpc_id]}]
+            ).get("VpcPeeringConnections", []),
+        )
+        peerings_by_id = {}
+        for p in peerings_raw:
+            if p.get("Status", {}).get("Code") in ("deleted", "deleting", "rejected", "failed"):
+                continue
+            peerings_by_id[p["VpcPeeringConnectionId"]] = p
+        peerings = list(peerings_by_id.values())
+        vpn_gateways = _safe(
+            "VPN gateways",
+            lambda: [
+                g
+                for g in ec2_client.describe_vpn_gateways(
+                    Filters=[{"Name": "attachment.vpc-id", "Values": [vpc_id]}]
+                ).get("VpnGateways", [])
+                if g.get("State") not in ("deleted", "deleting")
+            ],
+        )
+
+        custom_route_tables = [
+            rt for rt in route_tables if not any(a.get("Main") for a in rt.get("Associations", []))
+        ]
+        non_default_sgs = [sg for sg in security_groups if sg.get("GroupName") != "default"]
+        non_default_acls = [acl for acl in network_acls if not acl.get("IsDefault")]
+
+        # Hard blockers: Tuff will not auto-remove these (active use / attachments).
+        hard_blockers = []
+        if enis:
+            hard_blockers.append(f"{len(enis)} network interface(s)")
+        if nat_gateways:
+            hard_blockers.append(f"{len(nat_gateways)} NAT gateway(s)")
+        if endpoints:
+            hard_blockers.append(f"{len(endpoints)} VPC endpoint(s)")
+        if peerings:
+            hard_blockers.append(f"{len(peerings)} VPC peering connection(s)")
+        if vpn_gateways:
+            hard_blockers.append(f"{len(vpn_gateways)} VPN gateway(s)")
+
+        # Removable scaffolding that an ordered teardown can clear.
+        cleanup_items = []
+        if igws:
+            cleanup_items.append(f"{len(igws)} internet gateway(s)")
+        if egress_igws:
+            cleanup_items.append(f"{len(egress_igws)} egress-only internet gateway(s)")
+        if subnets:
+            cleanup_items.append(f"{len(subnets)} subnet(s)")
+        if custom_route_tables:
+            cleanup_items.append(f"{len(custom_route_tables)} custom route table(s)")
+        if non_default_sgs:
+            cleanup_items.append(f"{len(non_default_sgs)} custom security group(s)")
+        if non_default_acls:
+            cleanup_items.append(f"{len(non_default_acls)} custom network ACL(s)")
+
+        return {
+            "eni_count": len(enis),
+            "nat_gateway_count": len(nat_gateways),
+            "subnet_count": len(subnets),
+            "internet_gateway_count": len(igws),
+            "endpoint_count": len(endpoints),
+            "peering_count": len(peerings),
+            "vpn_gateway_count": len(vpn_gateways),
+            "hard_blockers": hard_blockers,
+            "cleanup_items": cleanup_items,
+            "subnet_ids": _ids(subnets, "SubnetId"),
+            "internet_gateway_ids": _ids(igws, "InternetGatewayId"),
+            "egress_only_igw_ids": _ids(egress_igws, "EgressOnlyInternetGatewayId"),
+            "custom_route_table_ids": _ids(custom_route_tables, "RouteTableId"),
+            "non_default_sg_ids": _ids(non_default_sgs, "GroupId"),
+            "non_default_acl_ids": _ids(non_default_acls, "NetworkAclId"),
+            "route_tables": route_tables,
+        }
+
     def scan_vpc(self) -> list:
-        ec2_client = self.client('ec2')
+        ec2_client = self.client("ec2")
         vpc_findings = []
 
-        for page in ec2_client.get_paginator('describe_vpcs').paginate():
-            for v in page.get('Vpcs', []):
-                vpc_id = v['VpcId']
+        for page in ec2_client.get_paginator("describe_vpcs").paginate():
+            for v in page.get("Vpcs", []):
+                vpc_id = v["VpcId"]
+                is_default = bool(v.get("IsDefault", False))
+                inventory = self._vpc_dependency_inventory(ec2_client, vpc_id)
 
-                enis = ec2_client.describe_network_interfaces(
-                    Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}]
-                )['NetworkInterfaces']
+                # Only surface VPCs with no live network attachments / NATs —
+                # those with ENIs are in active use.
+                if inventory["eni_count"] > 0 or inventory["nat_gateway_count"] > 0:
+                    continue
 
-                nat_gateways = ec2_client.describe_nat_gateways(
-                    Filters=[{'Name': 'vpc-id', 'Values': [vpc_id]}, {'Name': 'state', 'Values': ['available', 'pending']}]
-                )['NatGateways']
+                hard_blockers = list(inventory["hard_blockers"])
+                cleanup_items = list(inventory["cleanup_items"])
 
-                if len(enis) == 0 and len(nat_gateways) == 0:
-                    is_default = v.get('IsDefault', False)
-                    vpc_findings.append({
-                        "resource_type": "VPC",
-                        "resource_id": vpc_id,
-                        "issue": "Unused VPC",
-                        "severity": "low" if is_default else "medium",
-                        "metrics": {
-                            "eni_count": 0,
-                            "nat_gateway_count": 0,
-                            "is_default": is_default
-                        },
-                        "region": self.region,
-                        "recommendation": (
-                            "This is the account's default VPC; deleting it is optional and some "
-                            "services expect it to exist."
-                            if is_default else
-                            "Consider deleting this VPC to reduce management overhead and potential attack surface."
-                        ),
-                        # An empty VPC itself is free; the cost of keeping it is
-                        # operational rather than billed.
-                        "estimated_monthly_cost": 0
-                    })
+                if is_default:
+                    actionable = False
+                    remediation_mode = "informational"
+                    recommendation = (
+                        "This is the account's default VPC. Tuff will not delete it — "
+                        "some AWS services and console flows expect it to exist. "
+                        "Dismiss this finding unless you intentionally manage default VPCs yourself."
+                    )
+                    if cleanup_items:
+                        recommendation += f" Structural resources present: {', '.join(cleanup_items)}."
+                elif hard_blockers:
+                    actionable = False
+                    remediation_mode = "blocked"
+                    recommendation = (
+                        "This custom VPC has no ENIs/NATs but still has dependencies that "
+                        f"block safe deletion: {', '.join(hard_blockers)}. "
+                        "Remove those in AWS (or the console) before Tuff can delete the VPC."
+                    )
+                else:
+                    actionable = True
+                    remediation_mode = "safe_delete"
+                    if cleanup_items:
+                        recommendation = (
+                            "This custom VPC has no active workloads. Approving will run an "
+                            f"ordered cleanup ({', '.join(cleanup_items)}) then delete the VPC."
+                        )
+                    else:
+                        recommendation = (
+                            "This custom VPC has no remaining dependencies. "
+                            "Approving will delete the VPC."
+                        )
+
+                vpc_findings.append({
+                    "resource_type": "VPC",
+                    "resource_id": vpc_id,
+                    "issue": "Unused VPC",
+                    "severity": "low" if is_default or not actionable else "medium",
+                    "metrics": {
+                        "eni_count": inventory["eni_count"],
+                        "nat_gateway_count": inventory["nat_gateway_count"],
+                        "subnet_count": inventory["subnet_count"],
+                        "internet_gateway_count": inventory["internet_gateway_count"],
+                        "endpoint_count": inventory["endpoint_count"],
+                        "peering_count": inventory["peering_count"],
+                        "is_default": is_default,
+                        "actionable": actionable,
+                        "remediation_mode": remediation_mode,
+                        "blocking_dependencies": hard_blockers,
+                        "cleanup_items": cleanup_items,
+                    },
+                    "region": self.region,
+                    "recommendation": recommendation,
+                    "estimated_monthly_cost": 0,
+                    "actionable": actionable,
+                })
         return vpc_findings
+
+    def delete_vpc_safely(self, vpc_id: str) -> str:
+        """Ordered teardown for a custom VPC that passed the safe-delete checks."""
+        ec2 = self.client("ec2")
+
+        vpcs = ec2.describe_vpcs(VpcIds=[vpc_id]).get("Vpcs", [])
+        if not vpcs:
+            raise RuntimeError(f"VPC {vpc_id} was not found.")
+        if vpcs[0].get("IsDefault"):
+            raise RuntimeError(
+                f"Refusing to delete default VPC {vpc_id}. Remove it manually in AWS if required."
+            )
+
+        inventory = self._vpc_dependency_inventory(ec2, vpc_id)
+        if inventory["hard_blockers"]:
+            raise RuntimeError(
+                f"VPC {vpc_id} still has blocking dependencies: "
+                + ", ".join(inventory["hard_blockers"])
+            )
+
+        steps = []
+
+        for igw_id in inventory["internet_gateway_ids"]:
+            ec2.detach_internet_gateway(InternetGatewayId=igw_id, VpcId=vpc_id)
+            ec2.delete_internet_gateway(InternetGatewayId=igw_id)
+            steps.append(f"deleted IGW {igw_id}")
+
+        for eigw_id in inventory["egress_only_igw_ids"]:
+            ec2.delete_egress_only_internet_gateway(EgressOnlyInternetGatewayId=eigw_id)
+            steps.append(f"deleted egress-only IGW {eigw_id}")
+
+        for rt in inventory["route_tables"]:
+            if any(a.get("Main") for a in rt.get("Associations", [])):
+                continue
+            for assoc in rt.get("Associations", []):
+                assoc_id = assoc.get("RouteTableAssociationId")
+                if assoc_id and not assoc.get("Main"):
+                    ec2.disassociate_route_table(AssociationId=assoc_id)
+            ec2.delete_route_table(RouteTableId=rt["RouteTableId"])
+            steps.append(f"deleted route table {rt['RouteTableId']}")
+
+        for acl_id in inventory["non_default_acl_ids"]:
+            ec2.delete_network_acl(NetworkAclId=acl_id)
+            steps.append(f"deleted network ACL {acl_id}")
+
+        for sg_id in inventory["non_default_sg_ids"]:
+            ec2.delete_security_group(GroupId=sg_id)
+            steps.append(f"deleted security group {sg_id}")
+
+        for subnet_id in inventory["subnet_ids"]:
+            ec2.delete_subnet(SubnetId=subnet_id)
+            steps.append(f"deleted subnet {subnet_id}")
+
+        ec2.delete_vpc(VpcId=vpc_id)
+        steps.append(f"deleted VPC {vpc_id}")
+        return "Ordered VPC cleanup complete: " + "; ".join(steps)
+
+    def assert_volume_deletable(self, volume_id: str) -> None:
+        volume = self.client("ec2").describe_volumes(VolumeIds=[volume_id])["Volumes"][0]
+        state = volume.get("State")
+        attachments = volume.get("Attachments") or []
+        if state != "available" or attachments:
+            raise RuntimeError(
+                f"Volume {volume_id} is '{state}' with {len(attachments)} attachment(s). "
+                "Detach it in AWS before Tuff can delete it."
+            )
+
+    def assert_instance_exists(self, instance_id: str) -> dict:
+        reservations = self.client("ec2").describe_instances(InstanceIds=[instance_id]).get(
+            "Reservations", []
+        )
+        instances = [i for r in reservations for i in r.get("Instances", [])]
+        if not instances:
+            raise RuntimeError(f"Instance {instance_id} was not found.")
+        return instances[0]
+
+    def assert_instance_terminable(self, instance_id: str) -> None:
+        instance = self.assert_instance_exists(instance_id)
+        attrs = self.client("ec2").describe_instance_attribute(
+            InstanceId=instance_id, Attribute="disableApiTermination"
+        )
+        if attrs.get("DisableApiTermination", {}).get("Value"):
+            raise RuntimeError(
+                f"Instance {instance_id} has termination protection enabled. "
+                "Disable it in the AWS console, then retry."
+            )
+        state = instance.get("State", {}).get("Name")
+        if state in ("shutting-down", "terminated"):
+            raise RuntimeError(f"Instance {instance_id} is already {state}.")
+
+    def assert_instance_stoppable(self, instance_id: str) -> None:
+        instance = self.assert_instance_exists(instance_id)
+        state = instance.get("State", {}).get("Name")
+        if state not in ("running", "pending"):
+            raise RuntimeError(
+                f"Instance {instance_id} is '{state}', so it cannot be stopped right now."
+            )
+
+    def assert_rds_stoppable(self, db_id: str) -> None:
+        pages = self.client("rds").describe_db_instances(DBInstanceIdentifier=db_id)
+        databases = pages.get("DBInstances") or []
+        if not databases:
+            raise RuntimeError(f"RDS instance {db_id} was not found.")
+        db = databases[0]
+        engine = (db.get("Engine") or "").lower()
+        status = db.get("DBInstanceStatus")
+        if "aurora" in engine:
+            raise RuntimeError(
+                f"RDS {db_id} uses Aurora ({engine}). Stop this via the Aurora cluster "
+                "in AWS — Tuff will not stop Aurora instances directly."
+            )
+        if status != "available":
+            raise RuntimeError(
+                f"RDS {db_id} is '{status}', not 'available'. Wait until it is available, then retry."
+            )
+        if db.get("DeletionProtection"):
+            # Stop is still allowed with deletion protection; just note it in logs.
+            logger.info("RDS %s has deletion protection enabled (stop still allowed)", db_id)
 
     def scan_rds(self) -> list:
         rds_client = self.client('rds')
@@ -307,21 +759,45 @@ class AWSEngine:
 
                 if max(connection_peaks) == 0:
                     instance_class = db['DBInstanceClass']
+                    engine = db.get("Engine") or ""
+                    is_aurora = "aurora" in engine.lower()
+                    deletion_protection = bool(db.get("DeletionProtection"))
+                    blockers = []
+                    if is_aurora:
+                        blockers.append("Aurora engines must be stopped via the cluster in AWS")
+                    actionable = not is_aurora
+                    recommendation = (
+                        "Snapshot the database, then stop or delete it if the workload is genuinely retired."
+                    )
+                    if is_aurora:
+                        recommendation = (
+                            "This Aurora database looks idle, but Tuff will not stop it directly. "
+                            "Stop or delete the Aurora cluster in the AWS console."
+                        )
+                    elif deletion_protection:
+                        recommendation += (
+                            " Deletion protection is enabled — Tuff can still stop it, but "
+                            "termination from AWS requires disabling protection first."
+                        )
                     rds_findings.append({
                         "resource_type": "RDS",
                         "resource_id": db_id,
                         "issue": "Idle Database Instance",
                         "severity": "high",
                         "metrics": {
-                            "engine": db['Engine'],
+                            "engine": engine,
                             "instance_class": instance_class,
                             "max_connections_observed": max(connection_peaks),
                             "observation_days": LOOKBACK_DAYS,
                             "multi_az": db.get('MultiAZ', False),
+                            "deletion_protection": deletion_protection,
+                            "actionable": actionable,
+                            "blocking_dependencies": blockers,
                         },
                         "region": self.region,
-                        "recommendation": "Snapshot the database, then stop or delete it if the workload is genuinely retired.",
-                        "estimated_monthly_cost": _monthly_rds_cost(instance_class)
+                        "recommendation": recommendation,
+                        "estimated_monthly_cost": _monthly_rds_cost(instance_class),
+                        "actionable": actionable,
                     })
         return rds_findings
 
@@ -361,11 +837,14 @@ class AWSEngine:
                     "instance_type": current_type,
                     "suggested_type": suggested_type,
                     "observation_days": LOOKBACK_DAYS,
+                    "actionable": True,
+                    "blocking_dependencies": [],
                 },
                 "region": self.region,
                 "estimated_monthly_cost": current_cost,
                 "estimated_monthly_savings": round(max(0.0, current_cost - _monthly_ec2_cost(suggested_type)), 2),
-                "recommendation": f"Resize this instance to {suggested_type} to optimize costs. WARNING: Manually verify Memory utilization before downsizing to prevent OOM errors."
+                "recommendation": f"Resize this instance to {suggested_type} to optimize costs. WARNING: Manually verify Memory utilization before downsizing to prevent OOM errors.",
+                "actionable": True,
             })
         return findings
 
@@ -378,6 +857,7 @@ class AWSEngine:
         """
         scanners = (
             ("EC2 idle", self.scan_zombie_ec2),
+            ("EC2 stopped", self.scan_stopped_ec2),
             ("EBS unattached", self.scan_zombie_ebs),
             ("S3 exposure", self.scan_public_s3),
             ("VPC unused", self.scan_vpc),
@@ -415,7 +895,12 @@ class AWSEngine:
         a genuinely idle instance should be stopped, not resized.
         """
         by_resource: dict = {}
-        priority = {"Idle Instance": 2, "Scaling Candidate": 1}
+        priority = {
+            "Idle Instance": 3,
+            "Stopped Instance": 2,
+            "Scaling Candidate": 1,
+            "Unmonitored Instance": 0,
+        }
 
         for finding in findings:
             key = (finding["resource_id"], finding["resource_type"])
