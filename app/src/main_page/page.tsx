@@ -588,9 +588,7 @@ export default function MainPage() {
       });
 
       if (!response.ok) {
-        const bodyText = await response.text();
-        const detail = parseErrorDetail(bodyText);
-        if (isTuffCreditsExhausted(response.status, detail)) {
+        if (response.status === 402) {
           setIsPricingModalOpen(true);
           return;
         }

@@ -944,28 +944,9 @@ def analyze_infrastructure(
         if quota_error and not any(analysis for _, analysis, _, _ in results):
             # Provider rate limit — not a Tuff Pro upsell.
             _log_scan_failure(db, scan_id, user_id, request.region, quota_error)
-            raise HTTPException(
-                status_code=429,
-                detail={
-                    "code": "AI_PROVIDER_RATE_LIMIT",
-                    "message": (
-                        "The AI provider is rate-limiting requests. "
-                        "Wait a moment and try again. Your Tuff credits were not charged."
-                    ),
-                },
-            )
-        if upstream_error and not any(analysis for _, analysis, _, _ in results):
-            _log_scan_failure(db, scan_id, user_id, request.region, upstream_error)
-            raise HTTPException(
-                status_code=503,
-                detail={
-                    "code": "AI_PROVIDER_UNAVAILABLE",
-                    "message": (
-                        "AI analysis is temporarily unavailable. "
-                        "Your Tuff credits were not charged for this failure. Try again shortly."
-                    ),
-                },
-            )
+            if "ERROR_INSUFFICIENT_FUNDS" in quota_error:
+                raise HTTPException(status_code=503, detail="The AI provider is temporarily unavailable. Please try again later.")
+            raise HTTPException(status_code=503, detail="The AI provider is currently overloaded. Please try again later.")
 
         ai_evaluated_queue = []
         minimal_findings = []
