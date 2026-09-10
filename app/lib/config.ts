@@ -54,6 +54,11 @@ export async function extractErrorMessage(response: Response, fallback: string):
       const detail = data?.detail ?? data?.message;
 
       if (typeof detail === 'string') return detail;
+      // Structured API errors: { code, message }
+      if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+        const message = (detail as { message?: unknown }).message;
+        if (typeof message === 'string' && message.trim()) return message;
+      }
       // FastAPI validation errors arrive as a list of field descriptors.
       if (Array.isArray(detail)) {
         const parts = detail
@@ -70,6 +75,43 @@ export async function extractErrorMessage(response: Response, fallback: string):
     }
   } catch {
     return fallback;
+  }
+}
+
+/**
+ * True only when the user has exhausted *Tuff* credits — never when the
+ * upstream AI provider (OpenRouter/Groq) is out of key credits.
+ */
+export function isTuffCreditsExhausted(status: number, detail: unknown): boolean {
+  if (status !== 402) return false;
+
+  if (detail && typeof detail === 'object' && !Array.isArray(detail)) {
+    const code = (detail as { code?: unknown }).code;
+    if (code === 'TUFF_CREDITS_EXHAUSTED') return true;
+    // Structured body but wrong/missing code → do not open Upgrade.
+    if (typeof code === 'string' && code.length > 0) return false;
+  }
+
+  const text =
+    typeof detail === 'string'
+      ? detail
+      : detail && typeof detail === 'object' && !Array.isArray(detail)
+        ? String((detail as { message?: unknown }).message ?? '')
+        : '';
+
+  // Legacy string-only 402 from older backends.
+  return /TUFF_CREDITS_EXHAUSTED|free AI credits|Upgrade to Pro to continue analysing/i.test(
+    text,
+  );
+}
+
+/** Parse FastAPI `detail` (string | object | list) from a raw response body. */
+export function parseErrorDetail(bodyText: string): unknown {
+  try {
+    const parsed = JSON.parse(bodyText);
+    return parsed?.detail ?? parsed?.message ?? bodyText;
+  } catch {
+    return bodyText;
   }
 }
 

@@ -21,9 +21,19 @@ export interface Finding {
   recommended_action?: string;
   priority?: string;
   requires_upgrade?: boolean;
+  /** False when Tuff must not offer Approve (e.g. default VPC). */
+  actionable?: boolean;
+  /** Human-readable blockers that prevent safe remediation. */
+  blocking_dependencies?: string[];
+  remediation_mode?: string;
   metrics?: {
     suggested_type?: string;
     instance_type?: string;
+    actionable?: boolean;
+    blocking_dependencies?: string[];
+    cleanup_items?: string[];
+    remediation_mode?: string;
+    is_default?: boolean;
     [key: string]: unknown;
   };
 }

@@ -45,7 +45,7 @@ export default function HelpPanel({ onUpgradeClick }: { onUpgradeClick: () => vo
             <p>Tuff needs AWS credentials to read your resource configuration and CloudWatch metrics. Use a dedicated IAM user, never your root account.</p>
             <ol style={{ paddingLeft: '24px', display: 'flex', flexDirection: 'column', gap: '12px' }}>
               <li><strong>Create an IAM user:</strong> In the AWS Console, go to IAM and create a user named <code>tuff-agent</code>.</li>
-              <li><strong>Attach a policy:</strong> Click <em>Download IAM Policy</em> on the Connect AWS Account panel and attach it to the user. It contains two parts — a read-only block used for scanning, and a remediation block used only when you approve an action. If you want Tuff to be strictly read-only, delete every statement except <code>TUFFReadOnlyAccess</code> before attaching it; the scan will work and approvals will fail with an access-denied error.</li>
+              <li><strong>Attach a policy:</strong> Click <em>Copy IAM Policy JSON</em> on the Connect AWS Account panel, then in AWS IAM open your user → Add permissions → Create inline policy → JSON tab → paste → Next → Create. The policy has a read-only block for scanning and a remediation block used only when you approve an action. For read-only Tuff, keep only <code>TUFFReadOnlyAccess</code> before creating it.</li>
               <li><strong>Generate keys:</strong> Create an access key for this user (choose &quot;Application running outside AWS&quot;).</li>
               <li><strong>Connect:</strong> Click &quot;Connect AWS Account&quot; in the sidebar, paste the keys, and pick a region.</li>
             </ol>

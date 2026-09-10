@@ -2,7 +2,7 @@ import json
 import logging
 import os
 import re
-from typing import Optional, Tuple
+from typing import List, Optional, Tuple
 
 import openai
 from openai import OpenAI
@@ -18,21 +18,66 @@ logger = logging.getLogger(__name__)
 # layer can budget a scan up front instead of running out of credits midway.
 CREDITS_PER_FINDING = 100
 
-_openrouter_key = os.getenv("OPENROUTER_API_KEY")
-_groq_key = os.getenv("GROQ_API_KEY")
 
-client = OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key) if _openrouter_key else None
-groq_client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=_groq_key) if _groq_key else None
+def _clean_key(raw: Optional[str]) -> Optional[str]:
+    value = (raw or "").strip()
+    if not value or "your_" in value.lower() or value.endswith("_here"):
+        return None
+    return value
 
-PRIMARY_MODEL = "openrouter/auto"
-FALLBACK_MODEL = "llama-3.3-70b-versatile"
+
+_openrouter_key = _clean_key(os.getenv("OPENROUTER_API_KEY"))
+_groq_key = _clean_key(os.getenv("GROQ_API_KEY"))
+
+openrouter_client = (
+    OpenAI(base_url="https://openrouter.ai/api/v1", api_key=_openrouter_key)
+    if _openrouter_key
+    else None
+)
+groq_client = (
+    OpenAI(base_url="https://api.groq.com/openai/v1", api_key=_groq_key)
+    if _groq_key
+    else None
+)
+
+# Keep aliases used elsewhere in the module.
+client = openrouter_client
+
+# OpenRouter is primary when configured; Groq is the fallback. A dead
+# OpenRouter key used to 403 and falsely trigger the Upgrade modal — that path
+# is now classified as ERROR_UPSTREAM_API, not a Tuff billing upsell.
+# Prefer explicit JSON-capable models before openrouter/auto — auto often
+# returns prose/markdown that fails the analysis schema parse.
+OPENROUTER_MODELS = (
+    "openai/gpt-4o-mini",
+    "google/gemini-2.0-flash-001",
+    "openrouter/auto",
+)
+# Prefer models commonly available on free/dev Groq keys. Llama IDs 404 on
+# some accounts; gpt-oss is what succeeded with the current key.
+GROQ_MODELS = (
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+    "llama-3.1-8b-instant",
+    "llama-3.3-70b-versatile",
+)
 
 _PARSER_SYSTEM_PROMPT = "You are an automated cloud data parser. Respond exclusively with valid JSON."
 _VALID_PRIORITIES = {"high", "medium", "low"}
 
 
 def ai_configured() -> bool:
-    return client is not None or groq_client is not None
+    return openrouter_client is not None or groq_client is not None
+
+
+def _provider_chain() -> List[Tuple[str, OpenAI, Tuple[str, ...]]]:
+    """Ordered (label, client, models) attempts for analysis calls."""
+    chain: List[Tuple[str, OpenAI, Tuple[str, ...]]] = []
+    if openrouter_client is not None:
+        chain.append(("openrouter", openrouter_client, OPENROUTER_MODELS))
+    if groq_client is not None:
+        chain.append(("groq", groq_client, GROQ_MODELS))
+    return chain
 
 
 def sanitize_payload(data):
@@ -116,6 +161,176 @@ def _chat(active_client: OpenAI, model: str, system: str, prompt: str, json_mode
     return active_client.chat.completions.create(**kwargs)
 
 
+def _classify_provider_error(exc: Exception) -> str:
+    """Map provider failures to stable error markers for the API layer.
+
+    Only real rate limits become ERROR_QUOTA_EXCEEDED. Billing on the *provider*
+    account is ERROR_UPSTREAM_API — never ERROR_INSUFFICIENT_FUNDS, which the
+    frontend used to treat as "user must upgrade Tuff".
+    """
+    if isinstance(exc, openai.RateLimitError):
+        # OpenAI/Groq often raise RateLimitError for empty provider wallets
+        # ("insufficient_quota"). That is an operator billing problem — never a
+        # Tuff Pro upsell — so classify it as upstream, not quota.
+        text = str(exc).lower()
+        if any(
+            marker in text
+            for marker in ("insufficient", "quota", "billing", "payment", "credit", "funds")
+        ):
+            return f"ERROR_UPSTREAM_API: AI provider billing/credits are exhausted. ({exc})"
+        return f"ERROR_QUOTA_EXCEEDED: AI provider rate limit hit. ({exc})"
+    if isinstance(exc, openai.AuthenticationError):
+        return f"ERROR_UPSTREAM_API: AI provider rejected the API key. ({exc})"
+    if isinstance(exc, openai.NotFoundError):
+        return f"ERROR_UPSTREAM_API: AI model or endpoint was not found. ({exc})"
+    if isinstance(exc, openai.APIStatusError):
+        if exc.status_code in (401, 403):
+            return f"ERROR_UPSTREAM_API: AI provider rejected the API key. ({exc})"
+        if exc.status_code == 402:
+            return f"ERROR_UPSTREAM_API: AI provider billing/credits are exhausted. ({exc})"
+        if exc.status_code == 429:
+            return f"ERROR_QUOTA_EXCEEDED: AI provider rate limit hit. ({exc})"
+        return f"ERROR_UPSTREAM_API: AI provider error occurred. ({exc})"
+    return f"ERROR_UPSTREAM_API: AI provider error occurred. ({exc})"
+
+
+def _extract_json_object(raw_content: str) -> dict:
+    """Parse a JSON object from model output, including markdown-fenced replies."""
+    text = (raw_content or "").strip()
+    if not text:
+        raise ValueError("empty model response")
+
+    # Strip ```json ... ``` / ``` ... ``` wrappers that models often add.
+    fenced = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+    if fenced:
+        text = fenced.group(1).strip()
+
+    try:
+        parsed = json.loads(text)
+    except json.JSONDecodeError:
+        # Last resort: take the outermost {...} block.
+        start = text.find("{")
+        end = text.rfind("}")
+        if start < 0 or end <= start:
+            raise
+        parsed = json.loads(text[start : end + 1])
+
+    if not isinstance(parsed, dict):
+        raise ValueError("expected a JSON object")
+    return parsed
+
+
+def _complete_with_providers(system: str, prompt: str, json_mode: bool, temperature: float):
+    """Try OpenRouter then Groq across configured models; raise a classified error."""
+    errors: List[str] = []
+    chain = _provider_chain()
+    if not chain:
+        raise RuntimeError(
+            "ERROR_UPSTREAM_API: No AI provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY."
+        )
+
+    for label, active_client, models in chain:
+        for model in models:
+            try:
+                response = _chat(active_client, model, system, prompt, json_mode, temperature)
+                logger.info("AI call succeeded via %s model=%s", label, model)
+                return response
+            except Exception as exc:
+                classified = _classify_provider_error(exc)
+                logger.warning("AI call failed via %s model=%s: %s", label, model, classified)
+                errors.append(f"{label}/{model}: {classified}")
+                # Auth failures on this provider: skip remaining models for it.
+                if isinstance(exc, (openai.AuthenticationError,)) or (
+                    isinstance(exc, openai.APIStatusError) and exc.status_code in (401, 403)
+                ):
+                    break
+
+    # Prefer quota marker if every attempt was rate-limited; otherwise upstream.
+    if errors and all("ERROR_QUOTA_EXCEEDED" in err for err in errors):
+        raise RuntimeError(errors[-1])
+    raise RuntimeError(
+        "ERROR_UPSTREAM_API: All configured AI providers failed. " + " | ".join(errors[-3:])
+    )
+
+
+def _complete_analysis_json(prompt: str) -> dict:
+    """Call providers until one returns parseable analysis JSON.
+
+    Some routed models (notably openrouter/auto) accept the request and return
+    200 with prose instead of a JSON object. Treating that as success left the
+    UI stuck on the degraded stub even when later models would have worked.
+    """
+    errors: List[str] = []
+    chain = _provider_chain()
+    if not chain:
+        raise RuntimeError(
+            "ERROR_UPSTREAM_API: No AI provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY."
+        )
+
+    # Prefer strict JSON mode first; fall back to free-form if the model rejects
+    # response_format or still returns fenced/prose JSON.
+    mode_attempts = (True, False)
+
+    for label, active_client, models in chain:
+        for model in models:
+            auth_failed = False
+            for use_json_mode in mode_attempts:
+                try:
+                    response = _chat(
+                        active_client, model, _PARSER_SYSTEM_PROMPT, prompt, use_json_mode, 0.1
+                    )
+                    raw_content = (response.choices[0].message.content or "").strip()
+                    parsed = _extract_json_object(raw_content)
+                    logger.info(
+                        "AI analysis JSON ok via %s model=%s json_mode=%s",
+                        label,
+                        model,
+                        use_json_mode,
+                    )
+                    return parsed
+                except Exception as exc:
+                    if isinstance(exc, (json.JSONDecodeError, ValueError, TypeError)):
+                        logger.warning(
+                            "AI analysis unparseable via %s model=%s json_mode=%s: %s",
+                            label,
+                            model,
+                            use_json_mode,
+                            exc,
+                        )
+                        errors.append(f"{label}/{model}: ERROR_INTERNAL_PARSING: {exc}")
+                        continue
+
+                    classified = _classify_provider_error(exc)
+                    logger.warning(
+                        "AI call failed via %s model=%s json_mode=%s: %s",
+                        label,
+                        model,
+                        use_json_mode,
+                        classified,
+                    )
+                    errors.append(f"{label}/{model}: {classified}")
+                    if isinstance(exc, (openai.AuthenticationError,)) or (
+                        isinstance(exc, openai.APIStatusError) and exc.status_code in (401, 403)
+                    ):
+                        auth_failed = True
+                        break
+                    # response_format unsupported → try without json_mode next.
+                    continue
+            if auth_failed:
+                break
+
+    if errors and all("ERROR_QUOTA_EXCEEDED" in err for err in errors):
+        raise RuntimeError(errors[-1])
+    if errors and all("ERROR_INTERNAL_PARSING" in err for err in errors):
+        raise RuntimeError(
+            "ERROR_INTERNAL_PARSING: All AI providers returned malformed analysis. "
+            + " | ".join(errors[-3:])
+        )
+    raise RuntimeError(
+        "ERROR_UPSTREAM_API: All configured AI providers failed. " + " | ".join(errors[-3:])
+    )
+
+
 def explain_finding(finding: dict) -> Tuple[dict, int]:
     """Turn a raw scanner finding into human-facing analysis.
 
@@ -126,7 +341,7 @@ def explain_finding(finding: dict) -> Tuple[dict, int]:
     """
     if not ai_configured():
         raise RuntimeError(
-            "ERROR_UPSTREAM_API: No AI provider is configured. Set OPENROUTER_API_KEY or GROQ_API_KEY."
+            "ERROR_UPSTREAM_API: No AI provider is configured. Set GROQ_API_KEY or OPENROUTER_API_KEY."
         )
 
     # Preprocess, secure, and minify payload before sending to external AI models
@@ -134,45 +349,7 @@ def explain_finding(finding: dict) -> Tuple[dict, int]:
     minified_payload = json.dumps(sanitized_finding, separators=(',', ':'))
     prompt = _build_prompt(minified_payload)
 
-    response = None
-    primary_error: Optional[Exception] = None
-
-    if client is not None:
-        try:
-            response = _chat(client, PRIMARY_MODEL, _PARSER_SYSTEM_PROMPT, prompt, True, 0.1)
-        except openai.RateLimitError as e:
-            raise RuntimeError(f"ERROR_QUOTA_EXCEEDED: Account token limit breached. ({e})")
-        except openai.APIStatusError as e:
-            if e.status_code not in (402, 403):
-                raise RuntimeError(f"ERROR_UPSTREAM_API: AI Provider error occurred. ({e})")
-            primary_error = e
-        except Exception as e:
-            raise RuntimeError(f"ERROR_INTERNAL_PARSING: Failed to process infrastructure payload. ({e})")
-
-    if response is None and groq_client is not None:
-        try:
-            response = _chat(groq_client, FALLBACK_MODEL, _PARSER_SYSTEM_PROMPT, prompt, True, 0.1)
-        except Exception as fallback_e:
-            if primary_error is not None:
-                raise RuntimeError(
-                    "ERROR_INSUFFICIENT_FUNDS: OpenRouter account lacks credits and Groq "
-                    f"fallback failed. ({primary_error}) - {fallback_e}"
-                )
-            raise RuntimeError(f"ERROR_UPSTREAM_API: AI Provider error occurred. ({fallback_e})")
-
-    if response is None:
-        if primary_error is not None:
-            raise RuntimeError(f"ERROR_INSUFFICIENT_FUNDS: AI provider rejected the request. ({primary_error})")
-        raise RuntimeError("ERROR_INTERNAL_PARSING: No response generated from AI providers.")
-
-    raw_content = (response.choices[0].message.content or "").strip()
-    try:
-        parsed = json.loads(raw_content)
-        if not isinstance(parsed, dict):
-            raise ValueError("expected a JSON object")
-    except Exception:
-        logger.warning("AI returned unparseable content for %s", finding.get("resource_id"))
-        raise RuntimeError("ERROR_INTERNAL_PARSING: AI returned a malformed analysis payload.")
+    parsed = _complete_analysis_json(prompt)
 
     priority = str(parsed.get("priority", "medium")).strip().lower()
     fallback_savings = finding.get("estimated_monthly_cost", 0) or 0
@@ -209,15 +386,12 @@ def humanize_insight(explanation: str, business_impact: str, recommended_action:
         "non-technical users in simple plain English."
     )
 
-    for active_client, model in ((client, PRIMARY_MODEL), (groq_client, FALLBACK_MODEL)):
-        if active_client is None:
-            continue
-        try:
-            response = _chat(active_client, model, system, prompt, False, 0.7)
-            content = (response.choices[0].message.content or "").strip()
-            if content:
-                return content
-        except Exception as e:
-            logger.info("Humanize attempt via %s failed: %s", model, e)
+    try:
+        response = _complete_with_providers(system, prompt, False, 0.7)
+        content = (response.choices[0].message.content or "").strip()
+        if content:
+            return content
+    except Exception as e:
+        logger.info("Humanize failed: %s", e)
 
     return "Failed to humanize the insight due to an AI provider error."

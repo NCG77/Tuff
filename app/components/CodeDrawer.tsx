@@ -18,8 +18,19 @@ export default function CodeDrawer({
       return `aws ec2 delete-volume \\\n  --volume-id ${item.id} \\\n  --region ${item.region}`;
     if (item.type.includes("RDS"))
       return `aws rds stop-db-instance \\\n  --db-instance-identifier ${item.id} \\\n  --region ${item.region}`;
-    if (item.type.includes("VPC"))
-      return `aws ec2 delete-vpc \\\n  --vpc-id ${item.id} \\\n  --region ${item.region}`;
+    if (item.type.includes("VPC")) {
+      if (item.actionable === false || item.metrics?.actionable === false) {
+        return `# Informational / blocked — do not delete from Tuff\n# ${item.recommended_action || "Review dependencies in the AWS console."}`;
+      }
+      return (
+        `# Ordered cleanup then delete (Tuff performs these steps)\n` +
+        `aws ec2 describe-internet-gateways --filters Name=attachment.vpc-id,Values=${item.id} --region ${item.region}\n` +
+        `aws ec2 delete-subnet --subnet-id <subnet-id> --region ${item.region}\n` +
+        `aws ec2 delete-vpc --vpc-id ${item.id} --region ${item.region}`
+      );
+    }
+    if (item.type.includes("Stopped"))
+      return `aws ec2 terminate-instances \\\n  --instance-ids ${item.id} \\\n  --region ${item.region}`;
     // Checked after the more specific types, because "Scaling Candidate (EC2)"
     // also contains "EC2".
     if (item.type.includes("EC2"))
