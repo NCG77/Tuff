@@ -779,7 +779,25 @@ async def aws_eventbridge_webhook(
 
 def _scan_region(access_key: str, secret_key: str, region: str) -> list:
     engine = AWSEngine(aws_access_key=access_key, aws_secret_key=secret_key, region_name=region)
-    return engine.execute_full_scan()
+    return engine.execute_full_scan(include_global=False)
+
+
+def _scan_global_resources(access_key: str, secret_key: str) -> list:
+    """Account-scoped checks that must run once per analyze, not per region.
+
+    S3 listing is global; tying it to us-east-1 previously meant a Mumbai-only
+    (or any non-us-east-1) scan silently skipped every bucket.
+    """
+    engine = AWSEngine(
+        aws_access_key=access_key,
+        aws_secret_key=secret_key,
+        region_name="us-east-1",
+    )
+    try:
+        return engine.scan_public_s3()
+    except Exception as e:
+        logger.warning("Global S3 scan failed: %s", e)
+        return []
 
 
 def _list_enabled_regions(access_key: str, secret_key: str) -> list:
@@ -890,7 +908,14 @@ def analyze_infrastructure(
                     logger.warning("Failed to scan region %s: %s", reg, e)
                     failed_regions.append(reg)
 
-        if failed_regions and len(failed_regions) == len(regions):
+        # Always run account-global scanners once, regardless of which region
+        # the user selected (including ap-south-1 / Mumbai-only scans).
+        global_findings = _scan_global_resources(access_key, secret_key)
+        if global_findings:
+            logger.info("Global scanners added %s finding(s)", len(global_findings))
+            raw_findings.extend(global_findings)
+
+        if failed_regions and len(failed_regions) == len(regions) and not raw_findings:
             raise HTTPException(
                 status_code=400,
                 detail="Tuff could not read any of the selected regions. Verify your credentials and IAM permissions.",
@@ -1372,6 +1397,7 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "rds:DescribeDBInstances",
                     "s3:ListAllMyBuckets",
                     "s3:GetBucketPublicAccessBlock",
+                    "s3:GetBucketLocation",
                     "cloudwatch:GetMetricStatistics",
                     "cloudwatch:ListMetrics",
                     "autoscaling:DescribeAutoScalingGroups",
