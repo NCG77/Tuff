@@ -339,13 +339,15 @@ class AWSEngine:
         return findings
 
     def scan_public_s3(self) -> list:
+        """Flag buckets with incomplete Public Access Block settings.
+
+        S3 bucket listing is account-global (not tied to the engine's region).
+        Call this once per analyze request — not from every regional scan —
+        so a Mumbai-only scan still surfaces exposed buckets without
+        duplicating findings on an all-regions run.
+        """
         s3_client = self.client('s3')
         findings = []
-
-        # S3 is global, so only enumerate buckets once per scan rather than
-        # duplicating every bucket finding for every region being scanned.
-        if self.region not in ("us-east-1", "global"):
-            return findings
 
         buckets_response = s3_client.list_buckets()
         for bucket in buckets_response.get('Buckets', []):
@@ -372,6 +374,14 @@ class AWSEngine:
                     continue
 
             if is_exposed:
+                bucket_region = "global"
+                try:
+                    loc = s3_client.get_bucket_location(Bucket=bucket_name)
+                    # us-east-1 returns LocationConstraint null.
+                    bucket_region = loc.get("LocationConstraint") or "us-east-1"
+                except ClientError as e:
+                    logger.info("Could not resolve region for bucket %s: %s", bucket_name, e)
+
                 findings.append({
                     "resource_type": "S3_Bucket",
                     "resource_id": bucket_name,
@@ -382,7 +392,7 @@ class AWSEngine:
                         "actionable": True,
                         "blocking_dependencies": [],
                     },
-                    "region": "global",
+                    "region": bucket_region,
                     "estimated_monthly_cost": 0,
                     "recommendation": "Enable Public Access Block configuration to secure bucket contents.",
                     "actionable": True,
@@ -848,22 +858,26 @@ class AWSEngine:
             })
         return findings
 
-    def execute_full_scan(self) -> list:
-        """Run every scanner, tolerating individual failures.
+    def execute_full_scan(self, include_global: bool = False) -> list:
+        """Run regional scanners, tolerating individual failures.
 
         Each scanner is isolated so that one denied IAM permission (for example
         no ``rds:DescribeDBInstances``) degrades that one check instead of
         wiping out the entire region's results.
+
+        Account-global checks (S3) are opt-in via ``include_global`` so the
+        analyze API can run them once per request rather than once per region.
         """
-        scanners = (
+        scanners = [
             ("EC2 idle", self.scan_zombie_ec2),
             ("EC2 stopped", self.scan_stopped_ec2),
             ("EBS unattached", self.scan_zombie_ebs),
-            ("S3 exposure", self.scan_public_s3),
             ("VPC unused", self.scan_vpc),
             ("RDS idle", self.scan_rds),
             ("EC2 rightsizing", self.scan_scaling_candidates),
-        )
+        ]
+        if include_global:
+            scanners.append(("S3 exposure", self.scan_public_s3))
 
         all_findings = []
         failures = []
@@ -921,11 +935,11 @@ if __name__ == "__main__":
     
     KEY = os.getenv("TEST_AWS_ACCESS_KEY")
     SECRET = os.getenv("TEST_AWS_SECRET_KEY")
-    
+
     if KEY and SECRET:
         print("🚀 Testing AWSEngine scanning mechanisms...")
         engine = AWSEngine(aws_access_key=KEY, aws_secret_key=SECRET)
-        report = engine.execute_full_scan()
+        report = engine.execute_full_scan(include_global=True)
         print(f"📊 Scan Complete. Found {len(report)} items needing attention.")
         import json
         print(json.dumps(report, indent=2))
