@@ -594,7 +594,7 @@ export default function FindingsPanel({
                   ) : (
                     <span
                       style={{
-                        color: "rgba(237, 224, 206, 0.55)",
+                        color: "rgba(210, 210, 210, 0.55)",
                         fontSize: "12px",
                         fontWeight: 600,
                         alignSelf: "center",

@@ -1402,20 +1402,10 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "rds:CreateDBSnapshot",
                     "s3:PutBucketPublicAccessBlock"
                 ],
-                "Resource": [
-                    "arn:aws:ec2:*:*:instance/*",
-                    "arn:aws:ec2:*:*:volume/*",
-                    "arn:aws:ec2:*:*:vpc/*",
-                    "arn:aws:ec2:*:*:subnet/*",
-                    "arn:aws:ec2:*:*:internet-gateway/*",
-                    "arn:aws:ec2:*:*:egress-only-internet-gateway/*",
-                    "arn:aws:ec2:*:*:route-table/*",
-                    "arn:aws:ec2:*:*:security-group/*",
-                    "arn:aws:ec2:*:*:network-acl/*",
-                    "arn:aws:rds:*:*:db:*",
-                    "arn:aws:rds:*:*:snapshot:*",
-                    "arn:aws:s3:::*"
-                ]
+                # Many EC2 mutate actions do not support resource-level ARNs;
+                # listing instance/vpc ARNs makes the AWS console reject the
+                # policy ("Invalid ARN" / "Policy validation failed").
+                "Resource": "*"
             },
             {
                 "Sid": "TUFFAutoScalingRemediationAccess",
@@ -1427,9 +1417,7 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "autoscaling:SuspendProcesses",
                     "autoscaling:ResumeProcesses"
                 ],
-                "Resource": [
-                    "arn:aws:autoscaling:*:*:autoScalingGroup:*:autoScalingGroupName/*"
-                ]
+                "Resource": "*"
             },
             {
                 "Sid": "TUFFEventBridgeAccess",
@@ -1440,10 +1428,7 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
                     "sns:CreateTopic",
                     "sns:Subscribe"
                 ],
-                "Resource": [
-                    "arn:aws:events:*:*:rule/*",
-                    "arn:aws:sns:*:*:*"
-                ]
+                "Resource": "*"
             }
         ]
     }
@@ -1455,10 +1440,10 @@ def generate_iam_policy(current_user: dict = Depends(get_current_user)):
         "note": (
             "Scanning only needs the TUFFReadOnlyAccess statement. Remove the other "
             "statements if you never want Tuff to be able to change your infrastructure. "
+            "Remediation statements use Resource '*' because many EC2 actions do not "
+            "support resource-level ARNs and fail AWS IAM policy validation otherwise. "
             "Include ec2:DescribeRegions so All Regions can discover account-enabled "
-            "regions; without it Tuff falls back to a built-in region list. "
-            "VPC cleanup also needs the extra Describe* and DeleteSubnet / "
-            "DetachInternetGateway-style actions in this policy."
+            "regions; without it Tuff falls back to a built-in region list."
         ),
     })
 
