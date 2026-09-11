@@ -588,7 +588,9 @@ export default function MainPage() {
       });
 
       if (!response.ok) {
-        if (response.status === 402) {
+        const bodyText = await response.text();
+        const detail = parseErrorDetail(bodyText);
+        if (isTuffCreditsExhausted(response.status, detail)) {
           setIsPricingModalOpen(true);
           return;
         }
@@ -598,6 +600,8 @@ export default function MainPage() {
         } else if (detail && typeof detail === "object" && !Array.isArray(detail)) {
           const nested = (detail as { message?: unknown }).message;
           if (typeof nested === "string" && nested.trim()) message = nested;
+        } else if (bodyText.trim()) {
+          message = bodyText.slice(0, 300);
         }
         setError(message);
         return;

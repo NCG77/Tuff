@@ -125,19 +125,23 @@ export default function AwsConnectForm({
       });
 
       if (!response.ok) {
-        // 402 means the account is out of AI credits rather than that the
-        // credentials are wrong, so route the user to the upgrade flow.
-        if (response.status === 402 && onTokenLimit) {
+        const bodyText = await response.text();
+        const detail = parseErrorDetail(bodyText);
+        // Only Tuff credit exhaustion opens Upgrade — never AI provider failures.
+        if (isTuffCreditsExhausted(response.status, detail) && onTokenLimit) {
           onTokenLimit();
           return;
         }
-        const message =
-          typeof detail === "string"
-            ? detail
-            : detail && typeof detail === "object" && !Array.isArray(detail) && typeof (detail as { message?: unknown }).message === "string"
-              ? String((detail as { message: string }).message)
-              : bodyText.slice(0, 300);
-        setError(message || "Tuff could not analyse your AWS account.");
+        let message = "Tuff could not analyse your AWS account.";
+        if (typeof detail === "string" && detail.trim()) {
+          message = detail;
+        } else if (detail && typeof detail === "object" && !Array.isArray(detail)) {
+          const nested = (detail as { message?: unknown }).message;
+          if (typeof nested === "string" && nested.trim()) message = nested;
+        } else if (bodyText.trim()) {
+          message = bodyText.slice(0, 300);
+        }
+        setError(message);
         return;
       }
 
