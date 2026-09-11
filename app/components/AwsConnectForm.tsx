@@ -125,11 +125,9 @@ export default function AwsConnectForm({
       });
 
       if (!response.ok) {
-        // Only Tuff free-credit exhaustion should open Upgrade. Provider
-        // outages (OpenRouter/Groq) return 503/429 and must never upsell.
-        const bodyText = await response.text();
-        const detail = parseErrorDetail(bodyText);
-        if (isTuffCreditsExhausted(response.status, detail) && onTokenLimit) {
+        // 402 means the account is out of AI credits rather than that the
+        // credentials are wrong, so route the user to the upgrade flow.
+        if (response.status === 402 && onTokenLimit) {
           onTokenLimit();
           return;
         }

@@ -11,7 +11,9 @@ load_dotenv(os.path.join(_HERE, ".env"))
 
 DATABASE_URL = os.getenv("DATABASE_URL")
 if not DATABASE_URL:
-    raise ValueError("DATABASE_URL environment variable is not set. Please configure it in .env.local or .env.")
+    import logging
+    logging.warning("DATABASE_URL is not set. Defaulting to ephemeral SQLite database.")
+    DATABASE_URL = "sqlite:///./tuff_local.db"
 
 # Supabase transaction pooler (:6543) + SQLAlchemy's own pool causes slow,
 # flaky checkouts. Prefer session mode (:5432) or the direct db host.
