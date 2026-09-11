@@ -310,7 +310,7 @@ export default function FindingsPanel({
                             : "Informational only — Tuff will not change this resource"
                         }
                         style={{
-                          color: "rgba(237, 224, 206, 0.55)",
+                          color: "#8b7355",
                           fontSize: "11px",
                           fontWeight: 600,
                           textTransform: "uppercase",
@@ -594,7 +594,7 @@ export default function FindingsPanel({
                   ) : (
                     <span
                       style={{
-                        color: "rgba(210, 210, 210, 0.55)",
+                        color: "#8b7355",
                         fontSize: "12px",
                         fontWeight: 600,
                         alignSelf: "center",
