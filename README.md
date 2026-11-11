@@ -17,6 +17,7 @@ Tuff is a production-ready analyzer that connects to your AWS environment to opt
 - **Security Hardening:** Detect vulnerabilities and automatically generate IAM policies.
 - **AI Insights:** Get intelligent explanations and actionable remediation steps.
 - **Real-Time Monitoring:** Active alerting backed by complete audit logs.
+- **MCP Server Support:** Native Model Context Protocol (MCP) server to query audits and cost waste directly from Claude Desktop, Cursor, or AI agents.
 
 ## 🚀 Quick Start
 
@@ -37,6 +38,14 @@ npm install
 npm run dev
 ```
 *Frontend runs on `http://localhost:3000` | Backend API runs on `http://localhost:8000`*
+
+### 3. MCP Server (AI Assistants / Cursor / Claude Desktop)
+```bash
+cd backend
+python mcp_server.py                     # Standard stdio mode for Claude Desktop / Cursor
+python mcp_server.py --transport sse    # Or HTTP/SSE mode on port 8001
+```
+*See [MCP_SETUP.md](MCP_SETUP.md) for Claude Desktop, Cursor, and agent configuration instructions.*
 
 ## 🛠️ Tech Stack
 
