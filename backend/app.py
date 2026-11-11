@@ -130,8 +130,15 @@ def finding_uid(resource_id: str, issue: str) -> str:
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
-    init_db()
-    logger.info("Database initialized successfully (environment=%s)", ENVIRONMENT)
+    try:
+        init_db()
+        logger.info("Database initialized successfully (environment=%s)", ENVIRONMENT)
+    except Exception as e:
+        logger.error(
+            "Database initialization failed during startup: %s. "
+            "Server will start in degraded mode; database-dependent routes will fail or retry upon request.",
+            e,
+        )
     if not ai_configured():
         logger.warning("No AI provider configured; /api/analyze will reject requests.")
     yield
