@@ -14,6 +14,9 @@ if not DATABASE_URL:
     import logging
     logging.warning("DATABASE_URL is not set. Defaulting to ephemeral SQLite database.")
     DATABASE_URL = "sqlite:///./tuff_local.db"
+elif DATABASE_URL.startswith("postgres://"):
+    # Normalize legacy postgres:// URI provided by platforms like Render
+    DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
 
 # Supabase transaction pooler (:6543) + SQLAlchemy's own pool causes slow,
 # flaky checkouts. Prefer session mode (:5432) or the direct db host.
