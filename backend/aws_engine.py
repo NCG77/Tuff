@@ -85,12 +85,17 @@ def suggest_smaller_type(instance_type: str) -> str:
 
 
 class AWSEngine:
-    def __init__(self, aws_access_key: str, aws_secret_key: str, region_name: str = "us-east-1"):
-        self.session = boto3.Session(
-            aws_access_key_id=aws_access_key,
-            aws_secret_access_key=aws_secret_key,
-            region_name=region_name
-        )
+    def __init__(
+        self,
+        aws_access_key: Optional[str] = None,
+        aws_secret_key: Optional[str] = None,
+        region_name: str = "us-east-1",
+    ):
+        session_kwargs = {"region_name": region_name}
+        if aws_access_key and aws_secret_key:
+            session_kwargs["aws_access_key_id"] = aws_access_key
+            session_kwargs["aws_secret_access_key"] = aws_secret_key
+        self.session = boto3.Session(**session_kwargs)
         # Bounded timeouts and retries keep a single unreachable region from
         # hanging the whole scan request.
         self._client_config = Config(
