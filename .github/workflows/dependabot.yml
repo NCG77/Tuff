@@ -1,12 +1,14 @@
 name: Dependabot Auto-Merge
 
 on:
-  pull_request:
+  pull_request_target:
 
 jobs:
   auto-merge:
     if: github.actor == 'dependabot[bot]'
     uses: NCG77/central-actions/.github/workflows/auto-merge-dependabot.yml@main
+    with:
+      pr-url: ${{ github.event.pull_request.html_url }}
     permissions:
       pull-requests: write
       contents: write
